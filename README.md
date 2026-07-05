@@ -315,6 +315,12 @@ If the device name differs from the default, update the following constant accor
 PEDAL_DEVICE = "/dev/input/by-id/usb-PCsensor_FootSwitch-event-kbd"
 ```
 
+# License & third-party code
+
+This repository is licensed under the Apache License, Version 2.0 (see [LICENSE](LICENSE)).
+
+`src/franka_fr3_arm_controllers/` is adapted from [gello_software](https://github.com/wuphilipp/gello_software), which vendors it under Apache-2.0; the directory retains its own [LICENSE](src/franka_fr3_arm_controllers/LICENSE) and [NOTICE](src/franka_fr3_arm_controllers/NOTICE) (Franka Robotics GmbH), which apply to that code.
+
 
 
 
