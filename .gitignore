@@ -1,5 +1,8 @@
 .vscode/
 
+# Claude Code local settings - may contain machine-specific commands/credentials
+.claude/settings.local.json
+
 build/
 install/
 log/
