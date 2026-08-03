@@ -86,15 +86,21 @@ from launch_ros.substitutions import FindPackageShare
 
 
 def generate_robot_nodes(context):
+    # Use franka_bringup's wrapper xacro, NOT franka_description's robot xacro directly.
+    # The description under franka_description/robots/<type>/<type>.urdf.xacro is
+    # geometry only - it declares no "ros2_control" arg, so asking for one is silently
+    # ignored and controller_manager aborts with "no ros2_control tag". The wrapper
+    # includes that description AND franka_hardware's franka_arm.ros2_control.xacro.
+    # (franka_bringup's own franka.launch.py hardcodes this same file.)
     urdf_path = PathJoinSubstitution(
-        [FindPackageShare("franka_description"), "robots", LaunchConfiguration("urdf_file")]
+        [FindPackageShare("franka_bringup"), "urdf", "franka_arm.urdf.xacro"]
     ).perform(context)
+    # The wrapper derives the description path from robot_type, so the config's arm_id
+    # ("fr3v2") is what selects the arm. The `urdf_file` config key is unused here.
     robot_description = xacro.process_file(
         urdf_path,
         mappings={
-            "ros2_control": "true",
-            "arm_id": LaunchConfiguration("arm_id").perform(context),
-            # NOT INSIDE OF FRANKA.LAUNCH.PY
+            "robot_type": LaunchConfiguration("arm_id").perform(context),
             "arm_prefix": LaunchConfiguration("arm_prefix").perform(context),
             "robot_ip": LaunchConfiguration("robot_ip").perform(context),
             "hand": LaunchConfiguration("load_gripper").perform(context),
