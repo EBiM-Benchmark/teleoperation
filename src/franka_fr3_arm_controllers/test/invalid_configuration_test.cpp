@@ -40,5 +40,11 @@ INSTANTIATE_TEST_SUITE_P(
                                                             1.0}),  // exceeding number of joints
                       rclcpp::Parameter("k_gains", std::vector<double>{}),  // empty
                       rclcpp::Parameter("d_gains", std::vector<double>{}),  // empty
+                      rclcpp::Parameter("gello_joint_directions",
+                                        std::vector<double>{1.0, 1.0}),  // wrong size
+                      rclcpp::Parameter(
+                          "gello_joint_directions",
+                          std::vector<double>{1.0, 1.0, 1.0, 0.0, 1.0, 1.0,
+                                              1.0}),  // invalid direction value
                       rclcpp::Parameter("k_alpha", double(-1.0)),           // out of range (<0)
                       rclcpp::Parameter("k_alpha", double(2.0))));          // out of range (>1)

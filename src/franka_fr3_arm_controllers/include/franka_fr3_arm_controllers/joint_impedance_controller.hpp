@@ -14,11 +14,13 @@
 
 #pragma once
 
+#include <array>
 #include <Eigen/Eigen>
 #include <controller_interface/controller_interface.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/joint_state.hpp>
 #include <string>
+#include <vector>
 #include "franka_fr3_arm_controllers/motion_generator.hpp"
 
 using CallbackReturn = rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn;
@@ -45,13 +47,30 @@ class JointImpedanceController : public controller_interface::ControllerInterfac
   std::string arm_id_;
   std::string namespace_prefix_;
   std::string robot_description_;
-  const int num_joints = 7;
+  static constexpr int num_joints = 7;
+  static constexpr double max_gello_state_age_seconds = 0.5;
+  std::array<std::string, num_joints> expected_gello_joint_names_;
   Vector7d q_;
   Vector7d dq_;
   Vector7d dq_filtered_;
   Vector7d k_gains_;
   Vector7d d_gains_;
   double k_alpha_;
+  double future_timestamp_tolerance_{0.05};
+  Vector7d gello_joint_directions_{Vector7d::Ones()};
+  Vector7d initial_robot_position_;
+  Vector7d initial_gello_position_;
+  bool mapping_references_valid_{false};
+  // Speed of the one-off trajectory that brings the arm from wherever it is to the
+  // GELLO's pose when teleoperation starts. Range (0, 1]; small is slow.
+  double motion_generator_speed_factor_{0.05};
+  // Cap on how fast the commanded goal may track the GELLO once following starts.
+  // The GELLO can be moved far faster than the arm may safely follow; without a
+  // limit a quick hand movement demands a large jump and trips a velocity reflex.
+  // <= 0 disables the limit.
+  double max_goal_velocity_{0.5};  // rad/s
+  Vector7d q_goal_limited_;
+  bool q_goal_limited_valid_{false};
   bool move_to_start_position_finished_{false};
   bool motion_generator_initialized_{false};
   rclcpp::Time start_time_;
@@ -59,13 +78,16 @@ class JointImpedanceController : public controller_interface::ControllerInterfac
   rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr joint_state_subscriber_ = nullptr;
   bool gello_position_values_valid_ = false;
   std::array<double, 7> gello_position_values_{0, 0, 0, 0, 0, 0, 0};
-  rclcpp::Time last_joint_state_time_;
+  rclcpp::Time last_valid_gello_receive_time_;
 
   Vector7d calculateTauDGains_(const Vector7d& q_goal);
+  Vector7d mapGelloToRobotGoal_();
   bool validateGains_(const std::vector<double>& gains, const std::string& gains_name);
+  bool validateGelloJointState_(const sensor_msgs::msg::JointState& msg,
+                                const rclcpp::Time& receive_time);
+  bool hasFreshGelloState_() const;
   bool initializeMotionGenerator_();
   void updateJointStates_();
-  void validateGelloPositions_(const sensor_msgs::msg::JointState& msg);
   void jointStateCallback_(const sensor_msgs::msg::JointState msg);
 };
 

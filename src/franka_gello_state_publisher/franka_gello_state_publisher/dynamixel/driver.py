@@ -45,6 +45,10 @@ def load_motor_config(motor_type: str = "xl330") -> dict:
     return config
 
 
+# Period of the background joint-reading thread. Must be well under the publisher's
+# period (30 Hz) or published samples are stale repeats.
+JOINT_POLLING_PERIOD_S = 0.02  # 50 Hz
+
 class DynamixelDriverProtocol(Protocol):
     def get_joints(self) -> np.ndarray:
         """
@@ -374,14 +378,21 @@ class DynamixelDriver(DynamixelDriverProtocol):
         # Continuously read joint positions and update the _buffered_joint_positions array
 
         while not self._stop_thread.is_set():
-            time.sleep(0.1)
+            # Target a fixed loop PERIOD rather than sleeping a fixed amount: a sync
+            # read of 8 motors at 57600 baud already costs ~30 ms, so a plain
+            # `sleep(period)` yields period + read_time (0.02 -> 50 ms -> 20 Hz).
+            # Sleeping only the remainder gives the requested rate when the link can
+            # keep up, and free-runs at the serial limit when it cannot.
+            loop_start = time.monotonic()
             try:
                 self._buffered_joint_positions = np.array(
                     self.read_value_by_name("present_position"), dtype=int
                 )
             except RuntimeError as e:
                 print(f"Warning: {e}")
-                continue
+            remaining = JOINT_POLLING_PERIOD_S - (time.monotonic() - loop_start)
+            if remaining > 0:
+                time.sleep(remaining)
 
     def get_joints(self) -> np.ndarray:
         if self._is_polling:

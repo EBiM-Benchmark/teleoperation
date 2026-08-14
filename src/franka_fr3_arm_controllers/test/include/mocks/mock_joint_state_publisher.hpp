@@ -14,6 +14,9 @@
 
 #pragma once
 
+#include <atomic>
+#include <array>
+#include <mutex>
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/joint_state.hpp>
 
@@ -31,18 +34,35 @@ class MockGelloJointStatePublisher : public rclcpp::Node {
                                 std::bind(&MockGelloJointStatePublisher::publishJointState_, this));
   }
 
+  void setTimestampOffset(double offset_seconds) {
+    timestamp_offset_seconds_.store(offset_seconds);
+  }
+
+  void setJointPositions(const std::array<double, 7>& positions) {
+    std::lock_guard<std::mutex> lock(joint_positions_mutex_);
+    joint_positions_ = positions;
+  }
+
  private:
   void publishJointState_() {
     auto message = sensor_msgs::msg::JointState();
-    message.header.stamp = this->now();
-    message.name = {"joint1", "joint2", "joint3", "joint4", "joint5", "joint6", "joint7", "joint8"};
-    message.position = {1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0};
-    message.velocity = {0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1};
-    message.effort = {0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01};
+    message.header.stamp =
+        this->now() + rclcpp::Duration::from_seconds(timestamp_offset_seconds_.load());
+    message.name = {"fr3_joint1", "fr3_joint2", "fr3_joint3", "fr3_joint4",
+                    "fr3_joint5", "fr3_joint6", "fr3_joint7"};
+    {
+      std::lock_guard<std::mutex> lock(joint_positions_mutex_);
+      message.position.assign(joint_positions_.begin(), joint_positions_.end());
+    }
+    message.velocity = {0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1};
+    message.effort = {0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01};
 
     publisher_->publish(message);
   }
 
   rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr publisher_;
   rclcpp::TimerBase::SharedPtr timer_;
+  std::atomic<double> timestamp_offset_seconds_{0.0};
+  std::mutex joint_positions_mutex_;
+  std::array<double, 7> joint_positions_{1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0};
 };

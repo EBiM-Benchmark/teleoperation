@@ -72,7 +72,9 @@ void JointImpedanceControllerTest::startExecutorThread() {
     std::unique_lock<std::mutex> lock(cv_mut_executor_thread_);
     while (!done_) {
       executor_->spin_some();
-      cv_executor_thread_.wait_for(lock, std::chrono::milliseconds(10));
+      // Keep in-process pub/sub latency well below the timestamp-tolerance
+      // boundaries exercised by the 25 ms and 60 ms validation tests.
+      cv_executor_thread_.wait_for(lock, std::chrono::milliseconds(1));
     }
   });
 }
@@ -93,12 +95,22 @@ JointImpedanceControllerTest::startController() {
   controller_->on_init();
   rclcpp_lifecycle::State state;
   controller_->on_configure(state);
+  // The real controller is configured inactive and must receive a fresh GELLO
+  // sample before torque control may be activated.  Let the 100 ms mock
+  // publisher timer deliver at least one sample through the executor.
+  std::this_thread::sleep_for(std::chrono::milliseconds(150));
   return controller_->on_activate(state);
 }
 
 void JointImpedanceControllerTest::setRobotPosition(const std::vector<double>& positions) {
   for (size_t i = 0; i < positions.size(); ++i) {
     position_states_[i] = positions[i];
+  }
+}
+
+void JointImpedanceControllerTest::setRobotVelocity(const std::vector<double>& velocities) {
+  for (size_t i = 0; i < velocities.size(); ++i) {
+    velocity_states_[i] = velocities[i];
   }
 }
 

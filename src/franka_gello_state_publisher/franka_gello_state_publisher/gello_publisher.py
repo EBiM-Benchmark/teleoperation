@@ -17,9 +17,19 @@ class GelloPublisher(Node):
 
     def __init__(self) -> None:
         super().__init__("gello_publisher")
-        self.PUBLISHING_RATE = 5  # Hz
+        self.PUBLISHING_RATE = 30  # Hz
 
         hardware_params: GelloHardwareParams = self._setup_hardware_parameters()
+        num_arm_joints = hardware_params["num_arm_joints"]
+        default_joint_names = [f"fr3_joint{i}" for i in range(1, num_arm_joints + 1)]
+        self.joint_names = list(
+            self.declare_parameter("joint_names", default_joint_names).value
+        )
+        self.frame_id = self.declare_parameter("frame_id", "fr3_link0").value
+        if len(self.joint_names) != num_arm_joints:
+            raise ValueError(
+                f"joint_names has {len(self.joint_names)} entries; expected {num_arm_joints}"
+            )
 
         try:
             self.gello_hardware = GelloHardware(hardware_params, self.get_logger())
@@ -54,21 +64,12 @@ class GelloPublisher(Node):
 
     def publish_joint_jog(self) -> None:
         """Publish current joint states and gripper position."""
-        JOINT_NAMES = [
-            "fr3_joint1",
-            "fr3_joint2",
-            "fr3_joint3",
-            "fr3_joint4",
-            "fr3_joint5",
-            "fr3_joint6",
-            "fr3_joint7",
-        ]
         [gello_arm_joints, gripper_position] = self.gello_hardware.get_joint_and_gripper_positions()
 
         arm_joint_states = JointState()
         arm_joint_states.header.stamp = self.get_clock().now().to_msg()
-        arm_joint_states.name = JOINT_NAMES
-        arm_joint_states.header.frame_id = "fr3_link0"
+        arm_joint_states.name = self.joint_names
+        arm_joint_states.header.frame_id = self.frame_id
         arm_joint_states.position = gello_arm_joints.tolist()
 
         gripper_joint_states = Float32()

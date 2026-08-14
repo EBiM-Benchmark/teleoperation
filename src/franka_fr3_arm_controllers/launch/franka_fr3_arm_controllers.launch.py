@@ -69,7 +69,16 @@ def generate_robot_nodes(context):
                 package="controller_manager",
                 executable="spawner",
                 namespace=namespace,
-                arguments=["joint_impedance_controller", "--controller-manager-timeout", "30"],
+                # Configure the effort controller, but do not claim/activate its
+                # command interfaces until the operator has verified a live GELLO
+                # topic and matched the leader/follower poses.  Activating during
+                # launch can enter torque control before the first valid target.
+                arguments=[
+                    "joint_impedance_controller",
+                    "--controller-manager-timeout",
+                    "30",
+                    "--inactive",
+                ],
                 parameters=[
                     PathJoinSubstitution(
                         [

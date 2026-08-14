@@ -16,3 +16,6 @@ __pycache__/
 .pytest_cache/
 
 .DS_Store
+
+# Scratch captures from gello_calibration_check.py --solve
+gello_calib_samples_*.json

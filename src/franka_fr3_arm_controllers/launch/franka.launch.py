@@ -70,7 +70,10 @@
 ############################################################################
 
 
+import tempfile
+
 import xacro
+import yaml
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
 from launch.actions import OpaqueFunction, Shutdown
@@ -111,6 +114,28 @@ def generate_robot_nodes(context):
 
     namespace = LaunchConfiguration("namespace").perform(context)
     arm_id = LaunchConfiguration("arm_id").perform(context)
+    arm_prefix = LaunchConfiguration("arm_prefix").perform(context)
+    # franka_robot_state_broadcaster addresses the exported ros2_control state
+    # interface directly.  With a prefixed arm that interface is, for example,
+    # "left_fr3v2/robot_state", so the broadcaster needs the complete hardware
+    # identifier.  The custom impedance controller intentionally still receives
+    # just "fr3v2" and derives "left_" from its node namespace.
+    hardware_arm_id = f"{arm_prefix}_{arm_id}" if arm_prefix else arm_id
+    # Parameters attached to the launch Node configure the spawner process, not
+    # the controller plugin it loads.  An explicit --param-file makes spawner
+    # forward the complete hardware identifier to the broadcaster controller.
+    # controller_manager's spawner parses --param-file using the controller's
+    # base name, not its fully-qualified namespaced node name.
+    broadcaster_params = {
+        "franka_robot_state_broadcaster": {
+            "ros__parameters": {"arm_id": hardware_arm_id}
+        }
+    }
+    with tempfile.NamedTemporaryFile(
+        mode="w", prefix="franka_robot_state_broadcaster_", suffix=".yaml", delete=False
+    ) as params_file:
+        yaml.safe_dump(broadcaster_params, params_file)
+        broadcaster_params_file = params_file.name
     load_gripper = LaunchConfiguration("load_gripper").perform(context)
     controllers_yaml = PathJoinSubstitution(
         [FindPackageShare("franka_fr3_arm_controllers"), "config", "controllers.yaml"]
@@ -172,8 +197,11 @@ def generate_robot_nodes(context):
             package="controller_manager",
             executable="spawner",
             namespace=namespace,
-            arguments=["franka_robot_state_broadcaster"],
-            parameters=[{"arm_id": LaunchConfiguration("arm_id").perform(context)}],
+            arguments=[
+                "franka_robot_state_broadcaster",
+                "--param-file",
+                broadcaster_params_file,
+            ],
             condition=UnlessCondition(LaunchConfiguration("use_fake_hardware")),
             output="screen",
         ),

@@ -22,6 +22,11 @@ def generate_robot_nodes(context):
     nodes = []
     for item_name, config in configs.items():
         namespace = config["namespace"]
+        num_arm_joints = config["num_arm_joints"]
+        joint_names = config.get(
+            "joint_names", [f"fr3_joint{i}" for i in range(1, num_arm_joints + 1)]
+        )
+        frame_id = config.get("frame_id", "fr3_link0")
         nodes.append(
             Node(
                 package="franka_gello_state_publisher",
@@ -34,6 +39,8 @@ def generate_robot_nodes(context):
                     {"com_port": "/dev/serial/by-id/" + config["com_port"]},
                     {"gello_name": item_name},
                     {"num_arm_joints": config["num_arm_joints"]},
+                    {"joint_names": joint_names},
+                    {"frame_id": frame_id},
                     {"joint_signs": config["joint_signs"]},
                     {"gripper": config["gripper"]},
                     {"gripper_range_rad": config["gripper_range_rad"]},

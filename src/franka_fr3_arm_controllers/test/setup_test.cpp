@@ -29,6 +29,66 @@ TEST_F(JointImpedanceControllerTest, TestActivate) {
   EXPECT_EQ(startController(), CallbackReturn::SUCCESS);
 }
 
+TEST_F(JointImpedanceControllerTest, TestActivateWithTimestamp25msInFuture) {
+  mock_joint_state_publisher_->setTimestampOffset(0.025);
+  EXPECT_EQ(startController(), CallbackReturn::SUCCESS);
+}
+
+TEST_F(JointImpedanceControllerTest, TestRejectTimestamp60msInFuture) {
+  mock_joint_state_publisher_->setTimestampOffset(0.060);
+  EXPECT_EQ(startController(), CallbackReturn::ERROR);
+}
+
+TEST_F(JointImpedanceControllerTest, TestRejectStaleTimestamp) {
+  mock_joint_state_publisher_->setTimestampOffset(-0.600);
+  EXPECT_EQ(startController(), CallbackReturn::ERROR);
+}
+
+TEST_F(JointImpedanceControllerTest, TestRejectNegativeFutureTimestampTolerance) {
+  controller_->on_init();
+  controller_->get_node()->set_parameter(rclcpp::Parameter("future_timestamp_tolerance", -0.01));
+  rclcpp_lifecycle::State state;
+  EXPECT_EQ(controller_->on_configure(state), CallbackReturn::FAILURE);
+}
+
+TEST_F(JointImpedanceControllerTest, TestZeroGelloDeltaProducesNoTargetJump) {
+  controller_->get_node()->set_parameter(rclcpp::Parameter(
+      "gello_joint_directions", std::vector<double>{-1.0, -1.0, 1.0, 1.0, 1.0, 1.0, -1.0}));
+  setRobotVelocity(std::vector<double>(num_joints, 0.0));
+  ASSERT_EQ(startController(), CallbackReturn::SUCCESS);
+
+  rclcpp::Time time;
+  const auto period = rclcpp::Duration::from_seconds(0.001);
+  ASSERT_EQ(controller_->update(time, period), controller_interface::return_type::OK);
+  for (double command : joint_commands_) {
+    EXPECT_NEAR(command, 0.0, 1e-9);
+  }
+}
+
+TEST_F(JointImpedanceControllerTest, TestConfiguredGelloJointDirectionsMapRelativeDeltas) {
+  controller_->get_node()->set_parameter(rclcpp::Parameter(
+      "gello_joint_directions", std::vector<double>{-1.0, -1.0, 1.0, 1.0, 1.0, 1.0, -1.0}));
+  setRobotVelocity(std::vector<double>(num_joints, 0.0));
+  ASSERT_EQ(startController(), CallbackReturn::SUCCESS);
+
+  rclcpp::Time time;
+  ASSERT_EQ(controller_->update(time, rclcpp::Duration::from_seconds(0.001)),
+            controller_interface::return_type::OK);
+
+  mock_joint_state_publisher_->setJointPositions(
+      std::array<double, num_joints>{1.1, 1.1, 1.1, 1.1, 1.1, 1.1, 1.1});
+  std::this_thread::sleep_for(std::chrono::milliseconds(150));
+  ASSERT_EQ(controller_->update(time, rclcpp::Duration::from_seconds(0.1)),
+            controller_interface::return_type::OK);
+
+  EXPECT_LT(joint_commands_[0], 0.0);  // Joint 1 inverted.
+  EXPECT_LT(joint_commands_[1], 0.0);  // Joint 2 inverted.
+  for (std::size_t i = 2; i <= 5; ++i) {
+    EXPECT_GT(joint_commands_[i], 0.0);  // Joints 3-6 preserve direction.
+  }
+  EXPECT_LT(joint_commands_[6], 0.0);  // Joint 7 inverted.
+}
+
 TEST_F(JointImpedanceControllerTest, TestUpdateMotionGeneratorOnly) {
   static const std::vector<double> kInitialRobotPosition = {0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1};
   static constexpr double kExpectedValue = -0.05;

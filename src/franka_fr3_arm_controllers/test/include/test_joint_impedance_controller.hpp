@@ -45,6 +45,7 @@ class JointImpedanceControllerTest : public ::testing::Test {
   void stopExecutorThread();
   rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn startController();
   void setRobotPosition(const std::vector<double>& positions);
+  void setRobotVelocity(const std::vector<double>& velocities);
   void setValidControllerParameters();
 
   std::shared_ptr<franka_fr3_arm_controllers::JointImpedanceController> controller_;

@@ -126,6 +126,19 @@ usb-ROBOTIS_OpenRB-150_BDEDB3875157375037202020FF102618-if00
 
 > **Note:** The USB device IDs may be different on a new computer. Be sure to verify the device IDs before updating the configuration.
 
+> ⚠ **Verify which device is which side** - the two GELLOs are indistinguishable from
+> their IDs alone, and having them swapped is not obvious: the arm follows nothing, or the
+> calibration tool reports that the arm moved while "its" GELLO stayed still. To check,
+> move **one** GELLO by hand and see which serial device changes:
+>
+> ```bash
+> python3 src/franka_gello_state_publisher/scripts/gello_calibration_check.py \
+>   --side left --monitor
+> ```
+>
+> The `GELLO ... deg moved` row must respond to the **left** GELLO. If it does not, the
+> `com_port` values in `franka_gello_duo.yaml` are swapped. (They were, until 2026-08-05.)
+
 ## GELLO Duo Configuration File
 
 The configuration file is located at:
@@ -168,6 +181,66 @@ RIGHT:
 
 > **Note:**
 > For `com_port`, only specify the USB device ID. Do **not** include `/dev/serial/by-id/`, as the launch file will automatically prepend this path.
+
+## Calibrating a GELLO (joint_signs and assembly_offsets)
+
+`assembly_offsets` and `joint_signs` describe how each Dynamixel is physically mounted.
+They are **per build** - they are not portable between GELLOs, and a wrong value is not
+cosmetic: an inverted sign makes the impedance controller drive the arm toward a mirrored
+pose, which can command past a joint limit and trip a `power_limit_violation` reflex.
+
+> ⚠ **`get_offsets.py` cannot detect a wrong sign.** It computes `assembly_offsets` from
+> the `--joint-signs` you give it and trusts them. Wrong signs produce offsets that look
+> perfectly plausible.
+
+### Check an existing calibration
+
+With the arm bringup running (so joint states are published) and the GELLO publisher
+**stopped** (it holds the serial port exclusively), pose the GELLO to match the arm and
+run:
+
+```bash
+python3 src/franka_gello_state_publisher/scripts/gello_calibration_check.py --side left
+```
+
+It prints the GELLO's reported joint values next to the arm's real ones. Every diff should
+be near zero. This is read-only and never commands the arm - run it with
+`joint_impedance_controller` inactive or unspawned so a bad calibration cannot move
+anything.
+
+### Derive a calibration
+
+```bash
+python3 src/franka_gello_state_publisher/scripts/gello_calibration_check.py --side left --solve
+```
+
+This captures **two or more** arm poses. One pose is not enough: for either sign there is
+an offset that fits it, so a single pose cannot determine the signs (verified in
+simulation - choosing the sign whose offset lands nearest a multiple of 90 degrees is
+wrong about half the time). With two poses the sign follows from the ratio of the deltas,
+and `|dRaw/dArm|` must come out near 1.0, which doubles as a check that you matched the
+poses properly.
+
+For each pose: put the arm somewhere, match the GELLO to it by eye, press Enter. Between
+poses move joints by roughly 35-150 degrees - too little and the direction is lost in
+posing error, too much and the raw encoder delta wraps. The tool keeps asking for poses
+until every joint is resolved, then prints a block to paste into
+`franka_gello_duo.yaml`.
+
+Afterwards re-run without `--solve` and confirm it reports `PASS` before starting the
+publisher.
+
+### The underlying mapping
+
+```
+normalized = mod((raw - assembly_offset) * joint_sign - MID, 2*pi) - pi + MID
+```
+
+which inverts to `assembly_offset = raw - joint_sign * (target + pi)`. Note the `+ pi`:
+normalized values are wrapped into `[MID-pi, MID+pi)`, so the naive
+`offset = raw - target*sign` is wrong by half a turn. `MID` is the midpoint of each
+joint's range, so joints 4 and 6 (whose ranges are not centred on zero) have windows that
+do not span `[-pi, pi)`.
 
 ## Start the GELLO Publisher
 
