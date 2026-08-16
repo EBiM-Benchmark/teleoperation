@@ -1,7 +1,7 @@
 /**:
   controller_manager:
     ros__parameters:
-      update_rate: 500  # Hz
+      update_rate: 100  # Hz - 500 starves the RS-485 Modbus link on a loaded companion
       joint_state_broadcaster_robotiq:
         type: joint_state_broadcaster/JointStateBroadcaster
         parameters:
