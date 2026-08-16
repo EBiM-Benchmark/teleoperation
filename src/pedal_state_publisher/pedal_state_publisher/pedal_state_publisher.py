@@ -28,6 +28,10 @@ except ImportError as exc:  # pragma: no cover - dependency hint
     ) from exc
 
 
+# PCsensor FootSwitch, used for autodetection when the explicit device candidates miss.
+PEDAL_VENDOR_ID = 0x3553
+PEDAL_PRODUCT_ID = 0xB001
+
 # keycode -> pedal letter. Both foot switches emit a/b/c in keyboard mode; devices
 # are distinguished by which node the event arrives on, not by the keycode.
 DEFAULT_KEYMAP = {
@@ -74,12 +78,28 @@ class PedalStatePublisher(Node):
         self.devices = {}
         self.devices[1] = self._open_device(1, "device1_candidates")
         self.devices[2] = self._open_device(2, "device2_candidates")
+
+        # Fall back to autodetection for whichever switch the explicit candidates did not
+        # find. Both switches expose an EMPTY USB serial, so they can only be ordered by
+        # their USB path - but the path is NOT stable: on this laptop it changed twice in
+        # one session (2.1/2.2 -> 1.1.2/1.1.3 -> 1.2/3) simply from replugging. Hard-coded
+        # by-path candidates and the ID_PATH udev rule both break every time that happens,
+        # which presents as `[Errno 19] No such device` on every read.
+        #
+        # Autodetection matches on vendor:product instead, then assigns switch 1 / switch 2
+        # by sorted USB path so the result is at least deterministic for a given cabling.
+        # That ordering is arbitrary with respect to which switch is physically on the
+        # left, so CHECK IT (press one pedal, see whether it reports 1x or 2x) and swap
+        # with the explicit parameters if it comes out backwards.
+        if not all(self.devices.values()):
+            self._autodetect_missing()
+
         self.fd_to_index = {dev.fd: idx for idx, dev in self.devices.items() if dev}
 
         if not self.fd_to_index:
             raise RuntimeError(
-                "No foot switch devices could be opened. Check the udev rule and "
-                "that the user is in the `input` group."
+                "No foot switch devices could be opened. Check that the switches are "
+                "plugged in, and that the user is in the `input` group."
             )
 
         rate = self.get_parameter("publish_rate").value
@@ -102,6 +122,51 @@ class PedalStatePublisher(Node):
                 continue
         self.get_logger().warn(f"Foot switch {index}: no candidate device found.")
         return None
+
+    def _autodetect_missing(self):
+        """Find PCsensor foot switches by vendor:product and fill any unopened slot."""
+        already = {d.path for d in self.devices.values() if d}
+        wanted_keys = set(DEFAULT_KEYMAP)
+        by_phys = {}
+        for path in evdev.list_devices():
+            try:
+                dev = evdev.InputDevice(path)
+            except (PermissionError, OSError):
+                continue
+            is_switch = dev.info.vendor == PEDAL_VENDOR_ID and dev.info.product == PEDAL_PRODUCT_ID
+            # Each switch exposes THREE interfaces on one USB path (keyboard, mouse and a
+            # third HID node). The mouse node also advertises EV_KEY, so presence of EV_KEY
+            # is not enough to pick the right one - require the actual a/b/c keycodes, and
+            # keep only ONE interface per physical switch (keyed by `phys`), or both slots
+            # get filled from the same pedal and the second switch is never read.
+            keys = set(dev.capabilities().get(evdev.ecodes.EV_KEY, []))
+            if is_switch and wanted_keys <= keys and dev.path not in already:
+                key = dev.phys or dev.path
+                if key not in by_phys:
+                    by_phys[key] = dev
+                    continue
+            dev.close()
+
+        # Sort by USB path so a given cabling always yields the same 1/2 assignment.
+        found = [by_phys[k] for k in sorted(by_phys)]
+
+        for index in (1, 2):
+            if self.devices[index] or not found:
+                continue
+            dev = found.pop(0)
+            try:
+                dev.grab()
+            except OSError as exc:
+                self.get_logger().warn(f"Foot switch {index}: {dev.path} busy ({exc}).")
+                dev.close()
+                continue
+            self.devices[index] = dev
+            self.get_logger().info(
+                f"Foot switch {index}: {dev.path} ({dev.name}) [autodetected, phys={dev.phys}]"
+            )
+
+        for dev in found:
+            dev.close()
 
     def _poll(self):
         fds = list(self.fd_to_index.keys())
