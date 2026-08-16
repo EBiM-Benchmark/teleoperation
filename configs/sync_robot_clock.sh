@@ -117,7 +117,16 @@ fi
 
 for ((round = 1; round <= MAX_ROUNDS; round++)); do
     # Correction the ROBOT must apply to its own clock to match the laptop.
-    delta=$(python3 -c "print(f'{-float('$skew'):+.6f}')")
+    # NOT an f-string: "$skew" expands to a single-quoted literal, and reusing single
+    # quotes inside a single-quoted f-string is a SyntaxError before Python 3.12
+    # (PEP 701 relaxed it). This ran as Python 3.11 and produced an EMPTY delta, so the
+    # correction silently became `date -d " seconds"` and the clock never moved - while
+    # the script still reported "NEEDS CORRECTION" each round and asked for sudo again.
+    delta=$(python3 -c "print('%+.6f' % -float('$skew'))")
+    if [ -z "$delta" ]; then
+        echo "ERROR: could not compute the correction delta from skew='$skew'" >&2
+        exit 1
+    fi
     echo
     echo "Round $round: applying ${delta}s on $HOST (sudo password may be requested)"
 

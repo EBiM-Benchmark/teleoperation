@@ -504,17 +504,163 @@ ros2 launch franka_gello_state_publisher main.launch.py config_file:=franka_gell
 * **LEFT = .12, RIGHT = .11** — the *reverse* of the upstream `example_fr3_duo_config.yaml`
   convention. Do not "fix" it to match the template.
 
-> ⚠ The impedance controller follows the GELLO **continuously with no ramp-in**: on
-> activation the arm drives toward whatever pose the GELLO is currently in. Move each GELLO
-> to roughly match its arm before launching, and bring up **one arm at a time** the first
-> time, to confirm the left/right mapping before two 7-DOF arms share a workspace.
+> ⚠ Bring up **one arm at a time** the first time, and confirm the left/right mapping
+> before two 7-DOF arms share a workspace.
+>
+> You do **not** need to pre-match each GELLO to its arm. `on_activate` captures the arm
+> pose and the GELLO pose in the same instant, so the initial delta is zero and the mapped
+> target starts at the arm's *current* pose — the controller logs exactly that. (An earlier
+> version of this warning said the arm "drives toward whatever pose the GELLO is currently
+> in"; that described the old absolute mapping and is no longer true.) What still matters is
+> keeping your hands **off** the GELLOs during activation: any movement between activation
+> and the first update becomes an approach target, traversed at
+> `motion_generator_speed_factor` (0.05, deliberately slow).
+>
+> The controller also spawns `--inactive` by design, so activation is an explicit gate:
+> `ros2 control set_controller_state joint_impedance_controller active -c /left/controller_manager`
 
-## Grippers — not yet working
+## Start both arms from the home pose
 
-`example_fr3_duo_config_robotiq.yaml` references FTDI serials that do not exist on this
-robot. The robot has `usb-FTDI_USB_TO_RS-485_DAAQM4W3-...` and `...DAAQM5UJ-...`; the config
-lists `DA8BS24U` / `DA8BU5F3`. The per-arm mapping still needs to be determined and written
-into that config.
+**Both arms must be at the agreed home pose before you activate teleop.** The impedance
+controller maps GELLO→arm as a *delta* from the poses captured at `on_activate`, so the arm
+follows from wherever it happens to be standing. Activate it away from home and the whole
+correspondence is offset — teleop still "works", it just does not match.
+
+`franka_msgs/action/PTPMotion` is the vendor point-to-point mover and drives them there.
+Deactivate `joint_impedance_controller` first — it holds the command interfaces. One arm at
+a time:
+
+```bash
+ros2 control set_controller_state joint_impedance_controller inactive -c /left/controller_manager
+
+# 7 values per side from configs/teleop_home_pose.yaml -> <SIDE>.arm_joint_positions
+ros2 action send_goal /left/action_server/ptp_motion franka_msgs/action/PTPMotion \
+  "{goal_joint_configuration: [-1.072185, -0.082723, 1.024787, -2.746873, 1.176839, 1.976895, 0.168207],
+    maximum_joint_velocities: [0.15,0.15,0.15,0.15,0.15,0.15,0.15], goal_tolerance: 0.01}"
+
+ros2 action send_goal /right/action_server/ptp_motion franka_msgs/action/PTPMotion \
+  "{goal_joint_configuration: [0.809728, -0.335639, -0.800341, -2.792884, -1.182067, 1.760234, -0.095578],
+    maximum_joint_velocities: [0.15,0.15,0.15,0.15,0.15,0.15,0.15], goal_tolerance: 0.01}"
+```
+
+`status: 2` is `TARGET_REACHED`. At 0.15 rad/s both arms reached home to within 0.0003 rad
+from roughly 2 rad away. `/<side>/action_server/error_recovery` is also available.
+
+> ⚠ **`/<side>/franka/joint_states` is NOT ordered `joint1..7`.** Observed orders were
+> `[1,2,3,4,5,7,6]` on the left and `[3,4,7,6,2,1,5]` on the right — `joint_state_publisher`
+> aggregates and does not sort. Always zip `msg.name` with `msg.position`; reading the array
+> positionally silently returns another joint's value. It first showed up as joint 4
+> apparently sitting outside its own limit. The controller itself is unaffected — it uses
+> ros2_control state interfaces, not this topic.
+
+## Grippers (Robotiq 2F-85)
+
+Working as of 2026-08-16. The grippers run **on the robot**, one `controller_manager` per
+gripper, independent of the arm stacks:
+
+```bash
+# robot
+ros2 launch franka_gripper_manager robotiq_gripper_controller_client.launch.py \
+  config_file:=tmr_duo_config_robotiq.yaml
+# laptop (same command as arm teleop - the GELLO publisher drives both)
+ros2 launch franka_gello_state_publisher main.launch.py config_file:=franka_gello_duo.yaml
+```
+
+Use `config/tmr_duo_config_robotiq.yaml`, **not** `example_fr3_duo_config_robotiq.yaml` —
+the upstream example lists FTDI serials (`DA8BS24U` / `DA8BU5F3`) that do not exist on this
+robot. This robot has `DAAQM5UJ` (left) and `DAAQM4W3` (right).
+
+The GELLO publishes a `std_msgs/Float32` percent on
+`<ns>/gripper/gripper_client/target_gripper_width_percent`; `robotiq_gripper_client`
+converts it to a `GripperCommand` action goal. **1.0 = open, 0.0 = closed.** Unlike the base
+and the arms, this message has **no header**, so nothing ages it — the gripper path is
+immune to the clock skew described above and works even on an unsynced robot clock.
+
+### ⚠ Bind each gripper to its ARM, never to the operator's hand
+
+**The operator's hands are crossed with respect to the namespaces, and that is intended.**
+Verified end to end on 2026-08-16 with both arms live and both grippers driven:
+
+| namespace | GELLO device | operator's hand | arm | gripper FTDI |
+| --- | --- | --- | --- | --- |
+| `left` | `BDEDB387` | **right** hand | `left_fr3v2` (.12) | `DAAQM4W3` |
+| `right` | `38F23AFA` | **left** hand | `right_fr3v2` (.11) | `DAAQM5UJ` |
+
+So the GELLO in your right hand drives the *left* arm and the *left* arm's gripper. Do not
+"fix" that — it is the arrangement the operator wants, and it was confirmed deliberately
+after a session spent flip-flopping over it.
+
+**The invariant that actually matters is coherence, not handedness:** whichever arm a GELLO
+moves, its trigger must close the gripper *bolted to that same arm*. Because the gripper and
+the arm share a namespace, that holds automatically as long as each gripper's `com_port` is
+bound to the namespace of the arm it is mounted on. Test it that way too — "does this GELLO
+move an arm and close the gripper on that same arm?" needs no left/right words and cannot be
+answered wrongly from the operator's frame.
+
+The gripper binding deliberately does **not** follow the udev symlink names: the robot's rule
+calls `DAAQM4W3` `r_gripper_r`, but that gripper is bolted to the arm the `left` namespace
+drives. The rule does usefully set `MODE:="0666"`, so no `dialout` membership is needed.
+Never use raw `/dev/ttyUSBn` — that numbering is not stable across reboots.
+
+**The trap.** A gripper must be bound to the arm it is physically bolted to, *not* to
+whichever hand it feels correct under. Those two differ whenever the GELLO→namespace
+assignment is itself crossed — and then "the trigger in my right hand closes the gripper on
+my right" is **true while the gripper is still on the wrong arm**. That is exactly what
+happened here: the gripper config was flipped to satisfy the operator's hand, it looked
+correct with the arms switched off, and the error only surfaced once the arms were
+activated.
+
+**Diagnose by splitting the chain into three independently measurable links**, and establish
+link 2 *first* — it is the anchor, and recollection is no substitute for measuring it:
+
+```bash
+# 1. GELLO device -> namespace. Fully objective, no human judgement:
+#    record both topics while ONE trigger is squeezed, then compare spans.
+ros2 topic echo /left/gripper/gripper_client/target_gripper_width_percent --field data
+ros2 topic echo /right/gripper/gripper_client/target_gripper_width_percent --field data
+
+# 2. namespace -> arm. Activate one side and watch which arm follows.
+ros2 control set_controller_state joint_impedance_controller active -c /left/controller_manager
+
+# 3. namespace -> gripper. Stop the GELLO publisher first (30 Hz, it overrides manual
+#    goals), drive the two to visibly opposite states, and check the CLOSED one is bolted
+#    to the arm identified in step 2.
+ros2 action send_goal /left/gripper/robotiq_gripper_controller/gripper_cmd \
+  control_msgs/action/GripperCommand "{command: {position: 0.78, max_effort: 1.0}}"
+ros2 action send_goal /right/gripper/robotiq_gripper_controller/gripper_cmd \
+  control_msgs/action/GripperCommand "{command: {position: 0.0, max_effort: 1.0}}"
+```
+
+Do **not** make "which one moved, left or right?" the primary test. Both readings (robot
+frame vs operator frame) are self-consistent, so the answer merely confirms whatever
+hypothesis you already held — it produced two confident wrong answers in a single session.
+
+**`gello_joint_directions` does not follow the device.** It lives in
+`franka_fr3_arm_controllers/config/controllers.yaml` and is keyed by **namespace**, but it
+belongs to the physical unit `BDEDB387`, whose `joint_signs` are wrong standalone. The
+working configuration is:
+
+```
+left  : BDEDB387 [-1,1,1,-1,1,1,-1] * [-1,-1,1,1,1,1,-1]   = [1,-1,1,-1,1,1,1]
+right : 38F23AFA [1,-1,1,-1,1,1,1]  * default [1]*7        = [1,-1,1,-1,1,1,1]
+```
+
+Only the **product** `joint_signs * gello_joint_directions` steers behaviour. If you ever
+rebind which GELLO serves which arm, you must move this override by hand — and be aware that
+reproducing the same product on the other arm is **not** sufficient. That was tried on
+2026-08-16: the devices were swapped, both products were preserved at `[1,-1,1,-1,1,1,1]`,
+and joint 2 still ran backwards on the right arm, needing a further flip. Treat a rebind as
+requiring a fresh per-joint direction check (`gello_calibration_check.py --side <s> --live`),
+not as bookkeeping.
+
+### A frozen gripper reading usually means nobody touched it
+
+`gripper_position_raw` is read straight from the servo with no normalisation, so a GELLO at
+rest reads a **bit-identical** value sample after sample. 858 identical samples is normal,
+not a dead servo. The driver's `_read_group` *raises* on a failed sync read rather than
+returning stale data, so any value you receive at all came from a successful read of every
+servo. Check the resting value against `gripper_range_rad`: at rest it should sit at or just
+past the open end (measured 3.3050 vs a configured open of 3.293).
 
 
 # Troubleshooting
