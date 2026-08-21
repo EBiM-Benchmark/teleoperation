@@ -1,0 +1,86 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!--
+  Fast DDS profile for the TMR station, replacing example_station/cyclonedds.xml.
+
+  Why Fast DDS and not CycloneDDS: the TMR robot's own stack and the Jetson Orin that
+  runs the ZED both use native Fast DDS on ROS_DOMAIN_ID 0. All participants in a ROS 2
+  graph must share one RMW implementation, so LABS moves rather than the robot.
+
+  Why this is more than an RMW swap: example_station pinned CycloneDDS to 127.0.0.1
+  (<NetworkInterface address="127.0.0.1"/>) because every node ran on one host. This
+  deployment is multi-host - LABS PC, TMR (172.16.16.0/24) and the Jetson - so the
+  localhost-only assumption goes away with it.
+
+  ==> EDIT <address> BELOW to this host's own IP on the robot subnet:
+        ip -4 addr show | grep 172.16.16
+      It is the LOCAL interface to bind to, NOT the robot's address. Getting this wrong
+      means no discovery at all and every device shows OFFLINE in the UI.
+
+  Each host (LABS PC, Jetson, teleop workspace) needs its own copy with its own address.
+-->
+<dds xmlns="http://www.eprosima.com">
+  <profiles>
+    <transport_descriptors>
+
+      <!-- Intra-host. Every LABS container runs network_mode:host + ipc:host, so they
+           share /dev/shm. Shared memory is far cheaper than loopback UDP for the raw
+           image topics. -->
+      <transport_descriptor>
+        <transport_id>labs_shm</transport_id>
+        <type>SHM</type>
+        <segment_size>134217728</segment_size>   <!-- 128 MiB -->
+        <maxMessageSize>4194304</maxMessageSize> <!-- 4 MiB: a 1080p BGR8 frame, unfragmented -->
+      </transport_descriptor>
+
+      <!-- Inter-host: LABS PC <-> TMR <-> Jetson Orin. -->
+      <transport_descriptor>
+        <transport_id>labs_udp</transport_id>
+        <type>UDPv4</type>
+
+        <!-- Equivalent of CycloneDDS <MaxMessageSize>65500B</MaxMessageSize>: keeps one
+             RTPS datagram just under the 65535 B IPv4 limit. -->
+        <maxMessageSize>65500</maxMessageSize>
+
+        <!-- Equivalent of CycloneDDS <SocketReceiveBufferSize min="10MB"/>. These are
+             capped by the kernel: net.core.rmem_max / net.core.wmem_max must be at least
+             this large or setsockopt silently clamps them. Both are set by each
+             service's entrypoint.sh. -->
+        <sendBufferSize>10485760</sendBufferSize>
+        <receiveBufferSize>10485760</receiveBufferSize>
+
+        <!-- Equivalent of CycloneDDS <Interfaces><NetworkInterface .../>. -->
+        <interfaceWhiteList>
+          <address>172.16.16.100</address>
+        </interfaceWhiteList>
+      </transport_descriptor>
+
+    </transport_descriptors>
+
+    <participant profile_name="labs_participant" is_default_profile="true">
+      <rtps>
+        <userTransports>
+          <transport_id>labs_shm</transport_id>
+          <transport_id>labs_udp</transport_id>
+        </userTransports>
+        <!-- MUST stay false. Otherwise Fast DDS adds its own unfiltered UDPv4 transport
+             alongside ours and the interfaceWhiteList above is bypassed. -->
+        <useBuiltinTransports>false</useBuiltinTransports>
+
+        <builtin>
+          <discovery_config>
+            <leaseDuration><sec>10</sec></leaseDuration>
+            <leaseAnnouncement><sec>3</sec></leaseAnnouncement>
+          </discovery_config>
+          <!-- Unicast discovery fallback for switches that drop multicast. Harmless when
+               multicast works; check with `ros2 multicast send` / `receive` first. -->
+          <initialPeersList>
+            <locator><udpv4><address>172.16.16.10</address></udpv4></locator>  <!-- base + spine -->
+            <locator><udpv4><address>172.16.16.11</address></udpv4></locator>  <!-- RIGHT arm -->
+            <locator><udpv4><address>172.16.16.12</address></udpv4></locator>  <!-- LEFT arm -->
+            <!-- <locator><udpv4><address>172.16.16.XX</address></udpv4></locator> Jetson Orin -->
+          </initialPeersList>
+        </builtin>
+      </rtps>
+    </participant>
+  </profiles>
+</dds>

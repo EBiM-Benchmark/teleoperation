@@ -19,13 +19,17 @@ setup(
     zip_safe=True,
     maintainer="demo",
     maintainer_email="osmallfrogo.hchs@gmail.com",
-    description="Foot-pedal bridge to the TMR mobile base and Franka spine.",
+    description="Foot-pedal bridge to the TMR mobile base, Franka spine and LABS.",
     license="Apache-2.0",
     tests_require=["pytest"],
     entry_points={
         "console_scripts": [
             "base_bridge = tmr_pedal_teleop.base_bridge:main",
             "spine_bridge = tmr_pedal_teleop.spine_bridge:main",
+            "mode_manager = tmr_pedal_teleop.mode_manager:main",
+            "labs_pedal_bridge = tmr_pedal_teleop.labs_pedal_bridge:main",
+            "mobile_base_state_bridge = tmr_pedal_teleop.mobile_base_state_bridge:main",
+            "spine_state_publisher = tmr_pedal_teleop.spine_state_publisher:main",
         ],
     },
 )

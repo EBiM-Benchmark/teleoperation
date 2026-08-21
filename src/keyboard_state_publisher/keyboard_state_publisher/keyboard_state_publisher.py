@@ -14,6 +14,9 @@ VALID_KEYS = {
     "d": "right",
     "q": "turn_left",
     "e": "turn_right",
+    # Not a motion key: mode_manager listens for this and toggles the foot pedals
+    # between DRIVE (base/spine motion) and RECORD (LABS data collection).
+    "m": "toggle_mode",
 }
 
 
@@ -21,7 +24,9 @@ class KeyboardStatePublisher(Node):
     def __init__(self):
         super().__init__("keyboard_state_publisher")
         self.publisher = self.create_publisher(String, "/keyboard/state", 10)
-        self.get_logger().info("Press w/a/s/d/q/e. Press Ctrl+C to exit.")
+        self.get_logger().info(
+            "Press w/a/s/d/q/e to move, m to toggle the pedal mode. Press Ctrl+C to exit."
+        )
 
     def publish_key(self, key: str):
         msg = String()

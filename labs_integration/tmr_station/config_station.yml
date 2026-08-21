@@ -1,0 +1,182 @@
+metadata:
+  station_id: tmr_station
+
+# Franka Mobile FR3 Duo ("TMR"): 2x FR3 arms + Robotiq grippers on an omnidirectional
+# swerve base with a vertical spine.
+#
+# All hardware is driven by the teleoperation workspace
+# (github.com/EBiM-Benchmark/teleoperation, branch feat/tmr-mobile-teleop). LABS here is
+# recording + UI only, so franka-robot, controller-coordinator, franka-gello and
+# robotiq-gripper are commented out of docker-compose.yml. The ZED runs on a Jetson Orin.
+#
+# THREE RULES THIS FILE FOLLOWS - break any of them and episodes silently lose data:
+#
+# 1. EVERY TOPIC IS ABSOLUTE (leading '/').
+#    lerobot_conversion/topic_manifest.py reads leader_topic/follower_topic straight out
+#    of this YAML and never calls resolve_topic(), then string-matches them against
+#    config_data_recorder.yml. Namespace-relative topics (as used in example_station)
+#    therefore never match, and _filter_recorded_topics drops them from the dataset with
+#    only a logger.warning. Absolute topics pass through resolve_topic() unchanged, so
+#    runtime behaviour is identical and the manifest matches.
+#
+# 2. leader_topic IS ALWAYS ''.
+#    services/teleop.py builds a leader->follower republisher only `if leader_topic and
+#    follower_topic`. Empty means LABS declares recording semantics only and never
+#    commands the robot - correct, because the teleoperation workspace already does.
+#
+# 3. follower_device IS NEVER 'franka_fr3'.
+#    services/franka_robot.py creates controller-coordinator service clients for exactly
+#    that value. With the coordinator container disabled those clients never resolve and
+#    POST /api/v1/teleop/start fails permanently.
+#
+# ALSO: every topic listed here must publish CONTINUOUSLY for the whole episode.
+# dataset-builder's TemporalSynchronizer takes the latest first-message time and the
+# earliest last-message time across all topics and raises SynchronizationError if either
+# is more than 1 s from the episode bounds. An event-driven publisher fails the whole
+# conversion. This is why the base and spine bridges publish at a fixed rate even when
+# idle.
+
+embodiment:
+  # Action vector order == the order of this list, so base and spine are LAST: dims 0..16
+  # then stay identical to a bimanual-only layout.
+  teleop_robots:
+    - id: left_arm
+      type: TELEOP_ROBOT
+      config:
+        namespace: left
+        ros_message_type: sensor_msgs/JointState
+        leader_topic: ''
+        leader_device: tmr_gello_left
+        # What the joint_impedance_controller consumes, i.e. the commanded arm pose.
+        follower_topic: /left/gello/joint_states
+        follower_device: tmr_fr3_left
+
+    - id: left_gripper
+      type: TELEOP_ROBOT
+      config:
+        namespace: left
+        ros_message_type: std_msgs/Float32
+        leader_topic: ''
+        leader_device: tmr_gello_left
+        follower_topic: /left/gripper/gripper_client/target_gripper_width_percent
+        follower_device: tmr_robotiq_left
+
+    - id: right_arm
+      type: TELEOP_ROBOT
+      config:
+        namespace: right
+        ros_message_type: sensor_msgs/JointState
+        leader_topic: ''
+        leader_device: tmr_gello_right
+        follower_topic: /right/gello/joint_states
+        follower_device: tmr_fr3_right
+
+    - id: right_gripper
+      type: TELEOP_ROBOT
+      config:
+        namespace: right
+        ros_message_type: std_msgs/Float32
+        leader_topic: ''
+        leader_device: tmr_gello_right
+        follower_topic: /right/gripper/gripper_client/target_gripper_width_percent
+        follower_device: tmr_robotiq_right
+
+    - id: mobile_base
+      type: TELEOP_ROBOT
+      config:
+        namespace: base
+        # This literal string is required. configs/station.py defines
+        #   TWIST_STAMPED = "geometry_msgs/Twist Message"
+        # and pydantic matches plain Enum fields BY VALUE, so the malformed upstream
+        # spelling (a space, and no "Stamped") must be reproduced verbatim or the service
+        # refuses to start. The message type actually used is geometry_msgs/TwistStamped.
+        ros_message_type: 'geometry_msgs/Twist Message'
+        leader_topic: ''
+        leader_device: tmr_foot_pedals
+        # base_bridge publishes this at a fixed 20 Hz, zero when idle - required both by
+        # the swerve controller's 0.5 s cmd_vel_timeout and by rule 4 above.
+        follower_topic: /swerve_drive_controller/cmd_vel
+        follower_device: tmr_swerve_base
+
+    - id: spine
+      type: TELEOP_ROBOT
+      config:
+        namespace: spine
+        ros_message_type: std_msgs/Float32
+        leader_topic: ''
+        leader_device: tmr_foot_pedals
+        # Published by spine_bridge at 20 Hz. The spine hardware exposes only an action
+        # and services, so there is no native command topic to record.
+        follower_topic: /spine/target_height
+        follower_device: tmr_spine
+
+  # observation.state dimension order == the order of this list, then of the topics
+  # within each device.
+  observer_devices:
+    - id: head
+      type: ZED_CAMERA
+      config:
+        rgb:
+          # Published by the Jetson Orin. Launch the stock zed_wrapper there with
+          # camera_name:=head_camera to reproduce this exact name.
+          topic: /head_camera/zed_node/rgb/image_rect_color
+
+    - id: wrist_left
+      type: REALSENSE_CAMERA
+      config:
+        rgb:
+          topic: /wrist_camera_left/camera/color/image_raw
+
+    - id: wrist_right
+      type: REALSENSE_CAMERA
+      config:
+        rgb:
+          topic: /wrist_camera_right/camera/color/image_raw
+
+    # VERIFY these against the running stack before the first recording:
+    #   ros2 topic list | grep -E "franka_robot_state_broadcaster|gripper_joint_states"
+    # The teleoperation launch spawns franka_robot_state_broadcaster per arm namespace,
+    # but the exact topic set depends on the franka_ros2 version it builds against.
+    - id: franka_robot_left
+      type: ROBOT_OBSERVER
+      config:
+        topics:
+          - /left/franka_robot_state_broadcaster/measured_joint_states
+          - /left/franka_robot_state_broadcaster/external_joint_torques
+          - /left/franka_robot_state_broadcaster/external_wrench_in_stiffness_frame
+          # joint_state_broadcaster_robotiq publishes here (publish_topic:
+          # "gripper_joint_states" inside the left/gripper namespace).
+          - /left/gripper/gripper_joint_states
+
+    - id: franka_robot_right
+      type: ROBOT_OBSERVER
+      config:
+        topics:
+          - /right/franka_robot_state_broadcaster/measured_joint_states
+          - /right/franka_robot_state_broadcaster/external_joint_torques
+          - /right/franka_robot_state_broadcaster/external_wrench_in_stiffness_frame
+          - /right/gripper/gripper_joint_states
+
+    - id: mobile_base_state
+      type: ROBOT_OBSERVER
+      config:
+        topics:
+          # PoseStamped (7 dims) + TwistStamped (6 dims), republished from the base's
+          # odometry by tmr_pedal_teleop/mobile_base_state_bridge. Odometry is split this
+          # way because LABS understands neither nav_msgs/Odometry nor /tf at
+          # dataset-build time - see the note in config_data_recorder.yml.
+          - /mobile_base/pose
+          - /mobile_base/twist
+          # What the swerve controller actually applied after clamping, vs. what we
+          # commanded on /swerve_drive_controller/cmd_vel. TwistStamped (6 dims);
+          # requires the _handle_state_topic patch in lerobot_mcap_reader.py.
+          - /swerve_drive_controller/cmd_vel_out
+
+    - id: spine_state
+      type: ROBOT_OBSERVER
+      config:
+        # JointState, name=["spine_z"] -> 1 dim. Published at 50 Hz by
+        # tmr_pedal_teleop/spine_state_publisher, which polls the device at 5 Hz and
+        # republishes the last known height so the stream never has a gap.
+        topics:
+          - /spine/joint_states

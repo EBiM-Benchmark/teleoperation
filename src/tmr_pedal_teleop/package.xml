@@ -4,13 +4,16 @@
   <name>tmr_pedal_teleop</name>
   <version>0.0.1</version>
   <description>Bridges foot-pedal states (/pedal/state) to the TMR mobile base
-    (swerve_drive_controller/cmd_vel) and the Franka spine (MoveAbsolute).</description>
+    (swerve_drive_controller/cmd_vel) and the Franka spine (MoveAbsolute), switches the
+    pedals between DRIVE and RECORD roles, and drives LABS data collection.</description>
   <maintainer email="osmallfrogo.hchs@gmail.com">demo</maintainer>
   <license>Apache-2.0</license>
 
   <depend>rclpy</depend>
   <depend>std_msgs</depend>
   <depend>geometry_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>sensor_msgs</depend>
   <depend>franka_spine_msgs</depend>
 
   <test_depend>ament_copyright</test_depend>

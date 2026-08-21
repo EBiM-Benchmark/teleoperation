@@ -1,0 +1,192 @@
+diff --git a/.gitignore b/.gitignore
+index 7ad79eb..bbaf632 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -29,6 +29,9 @@ MANIFEST
+ # Deployments folders
+ deployments/*
+ !deployments/example_station
++# Tracked deliberately: the TMR station config has to be shared across sites, and
++# its topic list must stay in lockstep with the teleoperation workspace it records.
++!deployments/tmr_station
+ 
+ # PyInstaller
+ #  Usually these files are written by a python script from a template
+@@ -228,6 +231,9 @@ data/*
+ # Deployments folders
+ deployments/*
+ !deployments/example_station
++# Tracked deliberately: the TMR station config has to be shared across sites, and
++# its topic list must stay in lockstep with the teleoperation workspace it records.
++!deployments/tmr_station
+ 
+ # Custom
+ tmp
+diff --git a/services/pipeline/data-collection/entrypoint.sh b/services/pipeline/data-collection/entrypoint.sh
+index d31b68f..3584704 100755
+--- a/services/pipeline/data-collection/entrypoint.sh
++++ b/services/pipeline/data-collection/entrypoint.sh
+@@ -4,13 +4,16 @@
+ 
+ # Tuning DDS for large messages
+ sudo sysctl -w net.core.rmem_max=2147483647
++# Send side too: Ubuntu's default wmem_max is 212992 B, so setsockopt silently
++# clamps the sendBufferSize configured in the DDS profile without it.
++sudo sysctl -w net.core.wmem_max=2147483647
+ sudo sysctl -w net.ipv4.ipfrag_high_thresh=134217728
+ sudo sysctl -w net.ipv4.ipfrag_time=3
+ 
+ # Print ROS environment variables in interactive shells
+ echo "echo ROS_DOMAIN_ID: \$ROS_DOMAIN_ID" >>~/.bashrc
+ echo "echo RMW_IMPLEMENTATION: \$RMW_IMPLEMENTATION" >>~/.bashrc
+-echo "echo CYCLONEDDS_URI: \$CYCLONEDDS_URI" >>~/.bashrc
++echo "echo FASTRTPS_DEFAULT_PROFILES_FILE: \$FASTRTPS_DEFAULT_PROFILES_FILE" >>~/.bashrc
+ 
+ source /opt/ros/jazzy/setup.bash
+ echo "source /opt/ros/jazzy/setup.bash" >>~/.bashrc
+@@ -18,4 +21,4 @@ echo "source /opt/ros/jazzy/setup.bash" >>~/.bashrc
+ # For debugging
+ # sleep infinity
+ 
+-uv run src/main.py --ros-args --log-level rmw_cyclonedds_cpp:=ERROR
++uv run src/main.py --ros-args --log-level rmw_fastrtps_cpp:=ERROR
+diff --git a/services/pipeline/data-collection/src/services/franka_robot.py b/services/pipeline/data-collection/src/services/franka_robot.py
+index ce0382c..dff6de9 100644
+--- a/services/pipeline/data-collection/src/services/franka_robot.py
++++ b/services/pipeline/data-collection/src/services/franka_robot.py
+@@ -201,6 +201,14 @@ class FrankaRobotService(BaseRobotService):
+         num_coordinators = len(self._controller_coordinator_clients)
+         logger.info(f"Triggering controller coordinator action {action!r} for {num_coordinators} coordinator(s)")
+ 
++        if not self._controller_coordinator_clients:
++            # No teleop robot declares follower_device "franka_fr3", so no coordinator
++            # exists to trigger. Without this guard `pending` starts at 0, `_on_done`
++            # never fires, and done_event.wait() below burns its full 7 s timeout on
++            # every teleop endpoint before succeeding anyway.
++            logger.info(f"No controller coordinators configured; skipping {action!r}")
++            return
++
+         available_clients = self._get_available_clients_for_action(action)
+ 
+         # Timeout for service calls, should be longer than the controller coordinator's configured service timeout
+diff --git a/services/pipeline/data-collection/src/services/teleop.py b/services/pipeline/data-collection/src/services/teleop.py
+index 88582a7..1539367 100644
+--- a/services/pipeline/data-collection/src/services/teleop.py
++++ b/services/pipeline/data-collection/src/services/teleop.py
+@@ -132,6 +132,14 @@ class TeleopService:
+                     logger.error("Failed to recover to IDLE after start_syncing failure")
+             raise e
+ 
++        # SYNCING -> FOLLOWING is normally driven by a controller coordinator reporting
++        # FOLLOWING. When none are configured (the hardware is driven outside LABS)
++        # nothing ever reports, so the workflow would stick in SYNCING - and the UI's
++        # "Start recording" button only exists in the FOLLOWING button set.
++        if not self.robot_service.controller_coordinator_states:
++            logger.info("No controller coordinators configured; advancing SYNCING -> FOLLOWING")
++            self.state_machine.start_following()
++
+         logger.info("Syncing started successfully")
+         return TeleopResponse(status="success", message="Syncing started")
+ 
+diff --git a/services/pipeline/data-recorder/entrypoint.sh b/services/pipeline/data-recorder/entrypoint.sh
+index ff0f893..d59cb7e 100755
+--- a/services/pipeline/data-recorder/entrypoint.sh
++++ b/services/pipeline/data-recorder/entrypoint.sh
+@@ -4,6 +4,9 @@
+ 
+ # Tuning DDS for large messages
+ sudo sysctl -w net.core.rmem_max=2147483647
++# Send side too: Ubuntu's default wmem_max is 212992 B, so setsockopt silently
++# clamps the sendBufferSize configured in the DDS profile without it.
++sudo sysctl -w net.core.wmem_max=2147483647
+ sudo sysctl -w net.ipv4.ipfrag_high_thresh=134217728
+ sudo sysctl -w net.ipv4.ipfrag_time=3
+ 
+@@ -13,4 +16,4 @@ echo "source /opt/ros/jazzy/setup.bash" >>~/.bashrc
+ # For debugging
+ # sleep infinity
+ 
+-uv run src/main.py --ros-args --log-level rmw_cyclonedds_cpp:=ERROR
++uv run src/main.py --ros-args --log-level rmw_fastrtps_cpp:=ERROR
+diff --git a/services/pipeline/dataset-builder/src/lerobot_conversion/lerobot_mcap_reader.py b/services/pipeline/dataset-builder/src/lerobot_conversion/lerobot_mcap_reader.py
+index caab5b0..b046894 100644
+--- a/services/pipeline/dataset-builder/src/lerobot_conversion/lerobot_mcap_reader.py
++++ b/services/pipeline/dataset-builder/src/lerobot_conversion/lerobot_mcap_reader.py
+@@ -181,6 +181,8 @@ class LeRobotMCAPReader:
+             self._handle_joint_state(topic_name, message, ros_message, robot_states)
+         elif self._is_pose_stamped(schema):
+             self._handle_pose_stamped(topic_name, message, ros_message, robot_states)
++        elif self._is_twist_stamped(schema):
++            self._handle_twist_stamped_state(topic_name, message, ros_message, robot_states)
+         elif self._is_wrench_stamped(schema):
+             self._handle_wrench_stamped(topic_name, message, ros_message, robot_states)
+         elif self._is_bool(schema):
+@@ -338,6 +340,46 @@ class LeRobotMCAPReader:
+         except Exception as e:
+             logger.error(f"Failed to extract JointState from {topic_name}: {e}")
+ 
++    def _handle_twist_stamped_state(
++        self,
++        topic_name: str,
++        message: Message,
++        ros_message: TwistStamped,
++        robot_states: dict[str, list[RobotState]],
++    ) -> None:
++        """Handle TwistStamped message extraction for configured observation topics.
++
++        TwistStamped was previously only reachable on the action path, so a velocity
++        observation (a mobile base's measured or applied twist) was logged as an
++        unsupported schema and dropped. Mirrors ``_handle_twist_stamped`` but emits a
++        ``RobotState``.
++        """
++        try:
++            linear = ros_message.twist.linear
++            angular = ros_message.twist.angular
++
++            robot_state = RobotState(
++                timestamp_ns=message.log_time,
++                publish_time_ns=message.publish_time,
++                values=[linear.x, linear.y, linear.z, angular.x, angular.y, angular.z],
++                names=[
++                    "linear_x",
++                    "linear_y",
++                    "linear_z",
++                    "angular_x",
++                    "angular_y",
++                    "angular_z",
++                ],
++            )
++
++            if topic_name not in robot_states:
++                robot_states[topic_name] = []
++
++            robot_states[topic_name].append(robot_state)
++
++        except Exception as e:
++            logger.error(f"Failed to extract TwistStamped state from {topic_name}: {e}")
++
+     def _handle_pose_stamped(
+         self,
+         topic_name: str,
+diff --git a/services/sensors/realsense-camera/entrypoint.sh b/services/sensors/realsense-camera/entrypoint.sh
+index 4d6f1f2..14ff6df 100755
+--- a/services/sensors/realsense-camera/entrypoint.sh
++++ b/services/sensors/realsense-camera/entrypoint.sh
+@@ -2,13 +2,16 @@
+ 
+ # Tuning DDS for large messages
+ sudo sysctl -w net.core.rmem_max=2147483647
++# Send side too: Ubuntu's default wmem_max is 212992 B, so setsockopt silently
++# clamps the sendBufferSize configured in the DDS profile without it.
++sudo sysctl -w net.core.wmem_max=2147483647
+ sudo sysctl -w net.ipv4.ipfrag_high_thresh=134217728
+ sudo sysctl -w net.ipv4.ipfrag_time=3
+ 
+ # Print ROS environment variables in interactive shells
+ echo "echo ROS_DOMAIN_ID: \$ROS_DOMAIN_ID" >>~/.bashrc
+ echo "echo RMW_IMPLEMENTATION: \$RMW_IMPLEMENTATION" >>~/.bashrc
+-echo "echo CYCLONEDDS_URI: \$CYCLONEDDS_URI" >>~/.bashrc
++echo "echo FASTRTPS_DEFAULT_PROFILES_FILE: \$FASTRTPS_DEFAULT_PROFILES_FILE" >>~/.bashrc
+ 
+ source /opt/ros/humble/setup.bash
+ echo "source /opt/ros/humble/setup.bash" >>~/.bashrc

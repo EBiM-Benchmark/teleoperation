@@ -20,6 +20,13 @@ the pedals simply stops issuing steps, so the spine always comes to rest on its 
 Worst-case overshoot after release is one ``jog_step``.
 
 Combos (from config):  up = FS1.a + FS2.c ("1A"+"2C"),  down = FS1.c + FS2.a ("1C"+"2A").
+The combos only act while ``/teleop/pedal_mode`` is DRIVE; in RECORD mode the pedals
+belong to LABS data collection.
+
+This node also publishes the commanded height on ``target_topic`` at every tick, which is
+the spine's action dimension in a recorded dataset. It has to be gapless for the whole
+episode or LABS' TemporalSynchronizer fails the conversion, so when nothing is jogging it
+republishes the current position - the command then really is "stay where you are".
 """
 
 import rclpy
@@ -27,10 +34,13 @@ from rclpy.node import Node
 from rclpy.action import ActionClient
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.duration import Duration
-from std_msgs.msg import String
+from sensor_msgs.msg import JointState
+from std_msgs.msg import Float32, String
 
 from franka_spine_msgs.action import MoveAbsolute
 from franka_spine_msgs.srv import GetParameters, GetPosition, SwitchOn
+
+from tmr_pedal_teleop.mode_manager import DRIVE, MODE_QOS
 
 
 class SpineBridge(Node):
@@ -60,6 +70,14 @@ class SpineBridge(Node):
         # After a refused move, wait before retrying. Retrying at tick rate keeps the
         # device "busy" and produces a flood of 424s.
         self.declare_parameter("retry_delay", 0.5)
+        self.declare_parameter("mode_topic", "/teleop/pedal_mode")
+        # Commanded spine height, republished every tick so the dataset has a spine
+        # action dimension. The spine itself offers only an action + services.
+        self.declare_parameter("target_topic", "/spine/target_height")
+        # Seeds self.position while idle, so target_topic is never empty in an episode
+        # that contains no spine jog. Published by spine_state_publisher, which is the
+        # single owner of get_position polling - two pollers would fight for the device.
+        self.declare_parameter("state_topic", "/spine/joint_states")
 
         gp = self.get_parameter
         self.up_combo = set(gp("up_combo").value)
@@ -73,6 +91,7 @@ class SpineBridge(Node):
         self.retry_delay = gp("retry_delay").value
         self._backoff_until = self.get_clock().now()
         self._pending_target = None
+        self._last_target = None  # last value put on target_topic, for gapless publishing
 
         self.jog_dir = None         # None | "up" | "down": what the pedals currently ask
         self.step_active = False    # a MoveAbsolute is in flight
@@ -81,6 +100,8 @@ class SpineBridge(Node):
         self.limits = None          # (lower, upper) [m] once fetched
         self.pressed = set()
         self.last_msg_time = self.get_clock().now()
+        # Default to DRIVE so a bare `ros2 run` without mode_manager still jogs.
+        self.mode = DRIVE
 
         self.move_client = ActionClient(
             self, MoveAbsolute, gp("move_action").value, callback_group=cb
@@ -95,7 +116,15 @@ class SpineBridge(Node):
             GetPosition, gp("get_position_service").value, callback_group=cb
         )
 
+        self.target_pub = self.create_publisher(Float32, gp("target_topic").value, 10)
+        self.create_subscription(
+            JointState, gp("state_topic").value, self._on_spine_state, 10, callback_group=cb
+        )
+
         self.create_subscription(String, "/pedal/state", self._on_pedal, 10, callback_group=cb)
+        self.create_subscription(
+            String, gp("mode_topic").value, self._on_mode, MODE_QOS, callback_group=cb
+        )
         self.create_timer(1.0 / 20.0, self._tick, callback_group=cb)
         self._fetch_limits()
         self.get_logger().info(
@@ -162,7 +191,18 @@ class SpineBridge(Node):
         self.last_msg_time = self.get_clock().now()
         self.pressed = set() if msg.data == "NONE" else set(msg.data.split("+"))
 
+    def _on_mode(self, msg):
+        if msg.data == self.mode:
+            return
+        self.mode = msg.data
+        self.get_logger().info(f"spine_bridge mode -> {self.mode}")
+
     def _desired_dir(self):
+        # In RECORD mode the pedals belong to LABS. Returning None here (rather than
+        # short-circuiting _tick) lets an in-flight jog_step finish normally - this
+        # device has no working halt, so abandoning a goal is never the right move.
+        if self.mode != DRIVE:
+            return None
         up = bool(self.up_combo) and self.up_combo.issubset(self.pressed)
         down = bool(self.down_combo) and self.down_combo.issubset(self.pressed)
         if up and not down:
@@ -171,7 +211,48 @@ class SpineBridge(Node):
             return "down"
         return None  # neither, or ambiguous both
 
+    def _on_spine_state(self, msg):
+        """Seed the idle position from spine_state_publisher.
+
+        Ignored while a step is in flight: during a jog this node's own chained
+        get_position reads are authoritative, and _on_step_result depends on them.
+        """
+        if self.step_active or self.jog_dir is not None:
+            return
+        try:
+            idx = list(msg.name).index("spine_z")
+        except ValueError:
+            idx = 0
+        if idx < len(msg.position):
+            self.position = float(msg.position[idx])
+
+    def _publish_target(self):
+        """Publish the commanded spine height, so the dataset has a spine action.
+
+        Must be gapless for the whole episode: LABS' TemporalSynchronizer fails the
+        conversion if any configured topic starts >1 s late or stops >1 s early. Hence the
+        three-step fallback - an in-flight target, else the current position ("stay where
+        you are", which is genuinely the command when nothing is jogging), else whatever
+        was published last. Only the very first ticks, before any position is known, are
+        allowed to publish nothing.
+        """
+        target = self._pending_target
+        if target is None:
+            target = self.position
+        if target is None:
+            # position is briefly None after a refused or errored step, while the truth is
+            # re-read. Holding the previous value keeps the stream alive across that gap.
+            target = self._last_target
+        if target is None:
+            return
+        self._last_target = target
+        msg = Float32()
+        msg.data = float(target)
+        self.target_pub.publish(msg)
+
     def _tick(self):
+        self._publish_target()
+
         stale = (self.get_clock().now() - self.last_msg_time).nanoseconds > (
             self.pedal_timeout * 1e9
         )
@@ -248,11 +329,13 @@ class SpineBridge(Node):
         except Exception as exc:  # noqa: BLE001
             self.get_logger().warn(f"Spine goal send failed: {exc}")
             self.step_active = False
+            self._pending_target = None  # nothing outstanding; see _publish_target
             return
         if handle is None or not handle.accepted:
             # Usually "another motion is in progress" - back off and retry next tick.
             self.get_logger().warn("Spine step rejected; will retry.", throttle_duration_sec=2.0)
             self.step_active = False
+            self._pending_target = None  # nothing outstanding; see _publish_target
             return
         handle.get_result_async().add_done_callback(self._on_step_result)
 
@@ -270,6 +353,8 @@ class SpineBridge(Node):
         except Exception as exc:  # noqa: BLE001
             self.get_logger().warn(f"Spine step errored: {exc}")
             self.position = None
+            # No move is outstanding any more, so stop reporting one on target_topic.
+            self._pending_target = None
             self._backoff_until = self.get_clock().now()
             return
 
@@ -282,11 +367,15 @@ class SpineBridge(Node):
             # Do NOT advance the target. Re-read the truth and pause briefly rather than
             # hammering the device at tick rate, which keeps it "busy".
             self.position = None
+            # The move was refused, so it is no longer commanded: clearing this stops
+            # target_topic reporting a height the spine never went to.
+            self._pending_target = None
             self._backoff_until = self.get_clock().now() + Duration(seconds=self.retry_delay)
             return
 
         # Succeeded: the spine is at the commanded target.
         self.position = self._pending_target
+        self._pending_target = None
 
 
 def main(args=None):

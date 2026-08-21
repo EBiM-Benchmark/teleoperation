@@ -1,0 +1,58 @@
+url: "0.0.0.0:3002"
+output_path: "/workspace/data/raw_episodes"
+
+# This flat list is exactly what `ros2 bag record` captures - nothing else reaches an
+# episode. It must stay in sync with config_station.yml by hand: dataset-builder's
+# _filter_recorded_topics drops any configured topic missing from here with only a
+# logger.warning, and the result is a silently absent dataset column. After the first
+# recording, grep the build log for "Skipping configured".
+ros_topics:
+  - '/parameter_events'
+  - '/rosout'
+  # Recorded and preserved in the MCAP, but hard-dropped at dataset-build time by
+  # lerobot_mcap_reader._is_ignored_topic. Base pose therefore cannot be recovered from
+  # an exported LeRobot dataset via TF - that is why mobile_base_state_bridge publishes
+  # /mobile_base/pose explicitly. The raw MCAP still has the full TF tree.
+  - '/tf'
+  - '/tf_static'
+
+  # ---- Observation: arm + gripper state (ROBOT_OBSERVER) -------------------
+  - '/left/franka_robot_state_broadcaster/measured_joint_states'
+  - '/left/franka_robot_state_broadcaster/external_joint_torques'
+  - '/left/franka_robot_state_broadcaster/external_wrench_in_stiffness_frame'
+  - '/left/gripper/gripper_joint_states'
+  - '/right/franka_robot_state_broadcaster/measured_joint_states'
+  - '/right/franka_robot_state_broadcaster/external_joint_torques'
+  - '/right/franka_robot_state_broadcaster/external_wrench_in_stiffness_frame'
+  - '/right/gripper/gripper_joint_states'
+
+  # ---- Observation: mobile base + spine state (ROBOT_OBSERVER) -------------
+  - '/mobile_base/pose'
+  - '/mobile_base/twist'
+  - '/swerve_drive_controller/cmd_vel_out'
+  - '/spine/joint_states'
+
+  # ---- Actions (follower_topic of each TELEOP_ROBOT) -----------------------
+  - '/left/gello/joint_states'
+  - '/right/gello/joint_states'
+  - '/left/gripper/gripper_client/target_gripper_width_percent'
+  - '/right/gripper/gripper_client/target_gripper_width_percent'
+  - '/swerve_drive_controller/cmd_vel'
+  - '/spine/target_height'
+
+  # ---- Archived only -------------------------------------------------------
+  # Present in the MCAP but absent from config_station.yml, so dataset-builder logs
+  # "outside configured manifest" and skips them. Useful for offline debugging.
+  - '/swerve_drive_controller/odometry'
+  - '/pedal/state'
+  - '/teleop/pedal_mode'
+
+  # ---- Observation: cameras ------------------------------------------------
+  # NOTE: these are uncompressed sensor_msgs/Image. With the ZED on the Jetson this now
+  # crosses the network - HD720@30 is roughly 80 MB/s, HD1080@30 roughly 186 MB/s. Size
+  # the link and the ZED config accordingly (config on the Jetson, not here). Publishing
+  # CompressedImage instead is NOT an option: the whole LABS video path keys on the
+  # schema being exactly sensor_msgs/msg/Image.
+  - '/wrist_camera_left/camera/color/image_raw'
+  - '/wrist_camera_right/camera/color/image_raw'
+  - '/head_camera/zed_node/rgb/image_rect_color'

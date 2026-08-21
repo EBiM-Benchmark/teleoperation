@@ -5,6 +5,16 @@ For **manipulation tasks**, it provides the configuration and implementation for
 For **mobile tasks**, it supports teleoperation using either a **keyboard** or a **USB foot pedal**.
 Unless there are specific application requirements, **keyboard-based teleoperation is recommended** for mobile navigation, as it provides a more standardized and reliable control interface.
 
+Episode recording is provided by [**LABS**](https://github.com/frankarobotics/labs), driven
+from the same foot pedals — press **`m`** to switch them between moving the robot and
+controlling data collection.
+
+> 🚀 **Setting up a new laptop? Start with
+> [`docs/LABS_INTEGRATION.md`](docs/LABS_INTEGRATION.md).** It covers the whole path:
+> devices and udev rules, clock sync, Fast DDS networking, installing LABS, the ZED on the
+> Jetson, bring-up order, and a first-run checklist. The sections below are the per-subsystem
+> reference it links into.
+
 ## Package Overview
 * **franka_gello_state_publisher** - Reads the states of the Franka GELLO devices and publishes the joint states of the left arm, right arm, and grippers.
 * **franka_gello_state_subscriber** - Subscribes to the published GELLO states for testing or for subsequent integration with robot control.
@@ -12,7 +22,7 @@ Unless there are specific application requirements, **keyboard-based teleoperati
 * **keyboard_state_subscriber** - Subscribes to the keyboard state topic and prints the corresponding key events
 * **pedal_state_publisher** - Reads the **two** PCsensor foot switches via `evdev` and publishes the set of pressed pedals (`1A`..`2C`) on `/pedal/state`.
 * **pedal_state_subscriber** - Debug helper that prints pedal actions (superseded by `tmr_pedal_teleop`).
-* **tmr_pedal_teleop** - Bridges `/pedal/state` to the TMR mobile base (`swerve_drive_controller/cmd_vel`, `TwistStamped`) and the Franka spine (`franka_spine_msgs/action/MoveAbsolute`, hold-to-jog).
+* **tmr_pedal_teleop** - Bridges `/pedal/state` to the TMR mobile base (`swerve_drive_controller/cmd_vel`, `TwistStamped`) and the Franka spine (`franka_spine_msgs/action/MoveAbsolute`, hold-to-jog). Also owns the DRIVE/RECORD pedal mode (`mode_manager`), drives LABS data collection (`labs_pedal_bridge`) and publishes base/spine state for recording (`mobile_base_state_bridge`, `spine_state_publisher`).
 * **franka_spine_msgs** - Vendored spine action/service definitions (copied from the robot's `tams_ws`) so the spine bridge can build on the teleop host.
 * **franka_gripper_manager** - Controls the grippers; use `robotiq_gripper_client` for the TMR's Robotiq grippers.
 * **franka_fr3_arm_controllers** - Contains the control packages for the Franka FR3 robotic arms.
@@ -471,6 +481,122 @@ rather than the base holding a last command.
 > **Build note:** the message package `franka_spine_msgs` needs CMake to use the Pixi
 > environment's Python. If message generation fails to find NumPy, build with:
 > `colcon build --symlink-install --cmake-args -DPython3_EXECUTABLE=$(which python3)`.
+
+# LABS data collection (pedals switch roles with `m`)
+
+> Full setup walkthrough for a fresh machine:
+> **[`docs/LABS_INTEGRATION.md`](docs/LABS_INTEGRATION.md)**. This section is the reference
+> for how the mode switch and the pedal map behave.
+
+Episode recording is done by [LABS](https://github.com/frankarobotics/labs), running as
+containers on the teleop host. **LABS records; this workspace drives all the hardware.**
+Its `franka-robot`, `controller-coordinator`, `franka-gello` and `robotiq-gripper`
+services are commented out in `deployments/tmr_station/docker-compose.yml`, and the ZED
+runs on the Jetson Orin.
+
+## The mode switch
+
+All six pedals are already spent on base motion plus two spine combos, so they cannot also
+carry recording controls. Instead **`m` toggles what the whole set means**:
+
+| Mode | Pedals do | Base and spine |
+|---|---|---|
+| `DRIVE` (default) | move the base and jog the spine | live |
+| `RECORD` | drive LABS data collection | held still |
+
+`m` is read by `keyboard_state_publisher` (its terminal must have focus). This cannot
+clash with the pedals: `pedal_state_publisher` `grab()`s both foot switches exclusively, so
+their a/b/c keystrokes never reach the terminal. `mode_manager` latches the current mode on
+`/teleop/pedal_mode` with TRANSIENT_LOCAL durability, so a bridge that restarts picks it up
+immediately instead of guessing.
+
+**Switching to RECORD stops the base within one control cycle.** `base_bridge` keeps
+publishing a *zero* `TwistStamped` at 20 Hz rather than stopping — the swerve controller's
+0.5 s `cmd_vel_timeout` has to keep being fed, and a zero command is what actually holds
+the base. `spine_bridge` stops issuing jog steps but lets the step in flight finish, since
+this device has no usable halt.
+
+## Pedal map in RECORD mode
+
+`labs_pedal_bridge` polls `GET /api/v1/system/info` and calls the LABS REST API directly,
+so nothing depends on which window has focus. `recording_state` wins over `workflow_state`,
+matching the LABS UI's own button logic.
+
+| LABS state | FS1.a | FS1.b | FS1.c | FS2.a | FS2.b | FS2.c |
+|---|---|---|---|---|---|---|
+| IDLE | — | start teleop | — | — | — | — |
+| READY | — | stop teleop | sync robots | — | — | — |
+| SYNCING | — | stop teleop | — | — | — | — |
+| FOLLOWING | **start recording** | stop teleop | — | — | — | — |
+| RECORDING | **stop recording** | — | — | — | — | — |
+| REVIEWING | — | — | — | save successful | save failed | discard |
+
+Retune it in `src/tmr_pedal_teleop/config/pedal_map.yaml` (`map_<STATE>_<TOKEN>`), no code
+change needed.
+
+## Run
+
+```bash
+ros2 launch tmr_pedal_teleop mobile_teleop.launch.py \
+  labs_url:=http://localhost:3001 \
+  task_id:=<uuid from deployments/tmr_station/config_tasks.yml>
+```
+
+`task_id` is **required** to start a recording. LABS keeps its selected task in a browser
+cookie, so there is no server-side "current task" to read — an episode started by pedal
+uses the id given here, which can differ from what the browser shows. Keep them in sync.
+
+Add `record:=false` to bring up motion only, with no LABS bridge or state publishers.
+
+## What gets recorded, and the one rule that breaks episodes
+
+Beyond the arms and cameras, three nodes here exist purely so base and spine motion reach
+the dataset:
+
+| Node | Publishes | Why |
+|---|---|---|
+| `mobile_base_state_bridge` | `/mobile_base/pose` (`PoseStamped`), `/mobile_base/twist` (`TwistStamped`) | LABS understands neither `nav_msgs/Odometry` nor `/tf` at dataset-build time |
+| `spine_state_publisher` | `/spine/joint_states` (`JointState`) at 50 Hz | the spine has no state topic at all, only services |
+| `spine_bridge` | `/spine/target_height` (`Float32`) at 20 Hz | gives the spine an *action* dimension |
+
+> ⚠ **Every recorded topic must publish continuously for the whole episode.** LABS'
+> `TemporalSynchronizer` takes the latest first-message time and the earliest last-message
+> time across all configured topics and raises `SynchronizationError` if either is more
+> than 1 s from the episode bounds — so one event-driven publisher fails the *entire*
+> conversion, not just its own column. That is why each of these publishes at a fixed rate
+> even when idle, republishing its last known value rather than skipping a tick.
+
+Confirm the base odometry topic before the first recording — it is a parameter because it
+has not been verified on hardware:
+
+```bash
+ros2 topic list | grep -i swerve
+ros2 topic info /swerve_drive_controller/odometry
+```
+
+## DDS
+
+LABS ships configured for CycloneDDS on `ROS_DOMAIN_ID` 100. The TMR and the Jetson are
+native Fast DDS on domain 0, and all participants in a ROS 2 graph must share one RMW, so
+the TMR station config moves LABS to Fast DDS/domain 0 instead. Its `fastdds_labs.xml`
+mirrors `configs/fastdds_laptop_discovery.xml` here — each host needs its own copy with its
+own IP in `interfaceWhiteList`.
+
+## Installing the LABS side
+
+We have read-only access to `frankarobotics/labs`, so the changes ship in this repo under
+[`labs_integration/`](labs_integration/) and are applied on top of a clean checkout:
+
+```bash
+git clone git@github.com:frankarobotics/labs.git ~/Documents/code/labs
+cd ~/Documents/code/labs && git checkout 6a62eb5
+./bootstrap.sh && bash && task install:dependencies && git submodule update --init
+
+~/Documents/code/teleoperation/labs_integration/apply_to_labs.sh ~/Documents/code/labs
+```
+
+See [`labs_integration/README.md`](labs_integration/README.md) for what the patch changes
+and how to regenerate it.
 
 # Arm teleoperation (GELLO -> FR3 duo)
 

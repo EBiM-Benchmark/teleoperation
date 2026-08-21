@@ -1,0 +1,54 @@
+{
+  "_comment": [
+    "GR00T schema for the TMR station. This file is PURELY DESCRIPTIVE - nothing in LABS",
+    "validates it against the data, it is copied verbatim into the exported dataset. Get",
+    "it wrong and every downstream consumer mis-slices the vectors silently.",
+    "",
+    "The real layout is a flat concat in this order:",
+    "  state  = observer_devices order, then the topics within each device",
+    "  action = teleop_robots order (config_station.yml)",
+    "with per-topic width set by which handler in lerobot_mcap_reader.py fires:",
+    "  JointState    -> len(name), POSITION ONLY (velocity is never read)",
+    "  WrenchStamped -> 6   PoseStamped -> 7   TwistStamped -> 6   Float32 -> 1",
+    "",
+    "The offsets below assume 7 arm joints and 1 gripper joint per side. VERIFY after the",
+    "first conversion and correct this file to match reality:",
+    "  jq '.features[\"observation.state\"].shape, .features.action.shape' \\",
+    "     data/datasets/lerobot/<name>/meta/info.json      # expect [62] and [23]",
+    "",
+    "NOTE: example_station's modality.json is wrong in exactly this way - it declares 56",
+    "state dims by assuming measured_joint_states also yields 7 velocity dims, but",
+    "_handle_joint_state reads .position only. Do not copy its arithmetic."
+  ],
+  "state": {
+    "left_arm_position": { "start": 0, "end": 7 },
+    "left_arm_external_joint_torque": { "start": 7, "end": 14 },
+    "left_arm_external_wrench": { "start": 14, "end": 20 },
+    "left_gripper_position": { "start": 20, "end": 21 },
+    "right_arm_position": { "start": 21, "end": 28 },
+    "right_arm_external_joint_torque": { "start": 28, "end": 35 },
+    "right_arm_external_wrench": { "start": 35, "end": 41 },
+    "right_gripper_position": { "start": 41, "end": 42 },
+    "base_pose": { "start": 42, "end": 49 },
+    "base_velocity": { "start": 49, "end": 55 },
+    "base_velocity_applied": { "start": 55, "end": 61 },
+    "spine_position": { "start": 61, "end": 62 }
+  },
+  "action": {
+    "left_arm_position": { "start": 0, "end": 7 },
+    "left_gripper_position": { "start": 7, "end": 8 },
+    "right_arm_position": { "start": 8, "end": 15 },
+    "right_gripper_position": { "start": 15, "end": 16 },
+    "base_velocity": { "start": 16, "end": 22 },
+    "spine_position": { "start": 22, "end": 23 }
+  },
+  "video": {
+    "head": { "original_key": "observation.images.head" },
+    "wrist_left": { "original_key": "observation.images.wrist_left" },
+    "wrist_right": { "original_key": "observation.images.wrist_right" }
+  },
+  "annotation": {
+    "human.action.task_description": { "original_key": "task_index" },
+    "human.validity": {}
+  }
+}

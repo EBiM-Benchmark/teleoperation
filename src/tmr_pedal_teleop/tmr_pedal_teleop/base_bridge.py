@@ -4,12 +4,19 @@ Single pedals map to base motion (x+/x-, y+/y-, CW/CCW). When a spine combo is
 fully pressed the base is held still so the spine bridge can jog instead. A
 TwistStamped is published continuously at ``publish_rate`` (zero when nothing is
 pressed) so the swerve controller's watchdog is fed and the base stops on release.
+
+The pedals only act on the base while ``/teleop/pedal_mode`` is ``DRIVE`` (see
+``mode_manager``). In RECORD mode the zero stream keeps flowing - it must, or the
+controller's watchdog would time out - but no pedal contributes to it, so pressing
+``m`` brings the base to a stop within one control cycle.
 """
 
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import String
 from geometry_msgs.msg import TwistStamped
+
+from tmr_pedal_teleop.mode_manager import DRIVE, MODE_QOS
 
 
 class BaseBridge(Node):
@@ -35,6 +42,7 @@ class BaseBridge(Node):
         # combos that belong to the spine (base is suppressed while held)
         self.declare_parameter("up_combo", ["1A", "2C"])
         self.declare_parameter("down_combo", ["1C", "2A"])
+        self.declare_parameter("mode_topic", "/teleop/pedal_mode")
 
         gp = self.get_parameter
         self.frame_id = gp("frame_id").value
@@ -53,8 +61,11 @@ class BaseBridge(Node):
 
         self.pressed = set()
         self.last_msg_time = self.get_clock().now()
+        # Default to DRIVE so a bare `ros2 run` without mode_manager still drives.
+        self.mode = DRIVE
 
         self.create_subscription(String, "/pedal/state", self._on_pedal, 10)
+        self.create_subscription(String, gp("mode_topic").value, self._on_mode, MODE_QOS)
         self.pub = self.create_publisher(TwistStamped, gp("cmd_vel_topic").value, 10)
         rate = gp("publish_rate").value
         self.timer = self.create_timer(1.0 / max(rate, 1.0), self._publish)
@@ -67,16 +78,23 @@ class BaseBridge(Node):
         self.last_msg_time = self.get_clock().now()
         self.pressed = set() if msg.data == "NONE" else set(msg.data.split("+"))
 
+    def _on_mode(self, msg):
+        if msg.data == self.mode:
+            return
+        self.mode = msg.data
+        self.get_logger().info(f"base_bridge mode -> {self.mode}")
+
     def _combo_active(self):
         return any(combo and combo.issubset(self.pressed) for combo in self.combos)
 
     def _publish(self):
         x = y = yaw = 0.0
-        # Stop if the pedal publisher went silent, or a spine combo is held.
+        # Stop if the pedals are on recording duty, the pedal publisher went silent,
+        # or a spine combo is held.
         stale = (self.get_clock().now() - self.last_msg_time).nanoseconds > (
             self.pedal_timeout * 1e9
         )
-        if not stale and not self._combo_active():
+        if self.mode == DRIVE and not stale and not self._combo_active():
             for token in self.pressed:
                 axis_sign = self.axis_map.get(token)
                 if axis_sign is None:
