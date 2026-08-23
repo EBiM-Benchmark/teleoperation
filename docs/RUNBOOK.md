@@ -139,13 +139,24 @@ ssh companion 'ps -eo pid,ppid,etime,args | grep ros2'
 
 ## S5. Arm home pose
 
-`start_robot.bash` homes both arms automatically, after the grippers and before the base.
-It reads `~/teleop_home_pose.yaml` on the robot (copied from
+`start_robot.bash` homes both arms automatically, after the grippers and before the base,
+by calling [`robot/home_arms.py`](../robot/home_arms.py). It reads
+`~/teleop_home_pose.yaml` (deployed from
 [`configs/teleop_home_pose.yaml`](../configs/teleop_home_pose.yaml)), deactivates
 `joint_impedance_controller` first because it holds the command interfaces, and sends
-`PTPMotion` at 0.15 rad/s one arm at a time.
+`PTPMotion` at 0.15 rad/s.
 
-* It prints a warning and a **5 s countdown** before moving. Ctrl+C to skip.
+* **One DDS participant for both arms**, same as `activate_arms.py`. Shelling out to
+  `ros2 action send_goal` twice made the second call's discovery burst destroy the first
+  arm's goal response (`Failed to send goal response ... client will not receive response`).
+* **Skips an arm already at home** (every joint within 0.05 rad). Not just faster - each
+  PTP goal is another FCI Move cycle, and those are what trip the reflex. `--force`
+  overrides.
+* Run it by hand any time: `python3 ~/home_arms.py [--side left] [--force]`
+
+* It prints a warning and a **3 s countdown** before moving. Ctrl+C to skip - and it is
+  now genuinely interruptible, where the old bash retry loop swallowed the interrupt
+  and looked frozen.
 * `--no-home` disables it permanently.
 * Homing the arms matters because the GELLO to arm mapping is a **delta** captured at
   activation. Activate away from home and teleop still "works", it just does not match.

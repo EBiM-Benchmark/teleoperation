@@ -34,7 +34,7 @@ from controller_manager_msgs.srv import SwitchController
 
 CONTROLLER = "joint_impedance_controller"
 SIDES = ("left", "right")
-DISCOVERY_TIMEOUT = 60.0
+DISCOVERY_TIMEOUT = 15.0
 
 
 def main() -> int:
@@ -72,7 +72,7 @@ def main() -> int:
         # activate_asap/timeout left at defaults: the switch is a state transition, not a
         # motion, so there is nothing to wait on.
         fut = clients[side].call_async(req)
-        rclpy.spin_until_future_complete(node, fut, timeout_sec=20.0)
+        rclpy.spin_until_future_complete(node, fut, timeout_sec=10.0)
         res = fut.result()
         if res is None:
             node.get_logger().error(f"{side}: no response from switch_controller")
@@ -89,4 +89,8 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        print("\ninterrupted", file=sys.stderr)
+        sys.exit(130)

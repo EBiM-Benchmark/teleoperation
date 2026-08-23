@@ -206,8 +206,22 @@ fi
 echo "Starting pedal stack ($pedal_args)..."
 dexd "$prelude && exec ros2 launch tmr_pedal_teleop mobile_teleop.launch.py $pedal_args > /tmp/pedal.log 2>&1"
 
-echo "Waiting for both stacks (Fast DDS node creation takes 15-25 s here)..."
-sleep 25
+# Poll instead of sleeping a fixed 25 s: Fast DDS node creation is slow here, but how slow
+# varies, and waiting the worst case every time wastes most of a minute per restart.
+# Returns as soon as both stacks report ready; caps so a genuine failure still surfaces.
+ready_wait() {
+  local deadline=$(( SECONDS + ${TMR_READY_TIMEOUT:-30} ))
+  while (( SECONDS < deadline )); do
+    if dex 'grep -aq "Pedal publisher started" /tmp/pedal.log && grep -aq "gripper=" /tmp/gello.log' 2>/dev/null; then
+      return 0
+    fi
+    sleep 1
+  done
+  echo "  (still not ready after ${TMR_READY_TIMEOUT:-30}s - showing the logs anyway)" >&2
+  return 1
+}
+echo "Waiting for both stacks..."
+ready_wait || true
 
 echo
 echo "=== GELLO ==="

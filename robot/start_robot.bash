@@ -288,7 +288,7 @@ start_stage() {
 start_base() {
   start_stage "mobile base" \
     ros2 launch franka_bringup tmrv0_2.launch.py controller_name:=swerve_drive_controller
-  wait_for topic '/swerve_drive_controller/odom' 60 "base odometry"
+  wait_for topic '/swerve_drive_controller/odom' 30 "base odometry"
 
   # The base is useless if this one is not active - it owns the cartesian_velocity
   # command interfaces the pedal bridge ultimately drives.
@@ -319,7 +319,20 @@ start_base() {
 # One arm at a time, per the README: confirm the left/right mapping before two 7-DOF arms
 # share a workspace.
 home_arms() {
-  local side ns goal state
+  # Delegates to ~/home_arms.py: ONE DDS participant for both arms.
+  #
+  # This used to shell out to `ros2 action send_goal` once per arm. Each call creates a new
+  # participant, and that discovery burst repeatedly destroyed the other arm's goal
+  # response ("Failed to send goal response ... client will not receive response") on
+  # 2026-08-23. Same failure as two `ros2 control` calls killing the first arm; same fix.
+  #
+  # It also made Ctrl+C useless: a hung `timeout 120` call swallowed the interrupt and the
+  # bash retry loop just moved to the next attempt. One python process is interruptible.
+  local script="${TMR_HOME_SCRIPT:-$HOME/home_arms.py}"
+  if [ ! -f "$script" ]; then
+    echo "  WARNING: $script not found; skipping homing." >&2
+    return 0
+  fi
   if [ ! -f "$home_file" ]; then
     echo "  WARNING: home pose file not found ($home_file); skipping homing." >&2
     return 0
@@ -328,72 +341,25 @@ home_arms() {
   echo
   echo "=============================================================="
   echo " ABOUT TO MOVE BOTH ARMS to the teleop home pose."
-  echo " Clear the workspace and keep hands off the arms and GELLOs."
-  echo " Ctrl+C now to skip (or use --no-home to disable permanently)."
+  echo " Clear the workspace; hands off the arms and the GELLOs."
+  echo " Ctrl+C now to skip (--no-home disables this permanently)."
   echo "=============================================================="
-  for i in 5 4 3 2 1; do printf "\r  starting in %ss... " "$i"; sleep 1; done
+  for i in 3 2 1; do printf "\r  starting in %ss... " "$i"; sleep 1; done
   echo
 
-  for side in LEFT RIGHT; do
-    ns="$(echo "$side" | tr "[:upper:]" "[:lower:]")"
-
-    # A faulted arm reports its controller `active` while the hardware underneath is
-    # `unconfigured`; sending PTP goals at that is pointless and hides the real problem.
-    state="$(timeout "$cm_call_timeout" ros2 service call "/$ns/controller_manager/list_hardware_components" \
-      controller_manager_msgs/srv/ListHardwareComponents 2>/dev/null \
-      | grep -oE "state=.*label='[a-z]*'" | grep -oE "label='[a-z]*'" | cut -d"'" -f2 | head -1)"
-    if [ "$state" != "active" ]; then
-      echo "  WARNING: ${ns} hardware is '${state:-unknown}', not active; skipping ${ns} homing." >&2
-      echo "           Check for a communication_constraints_violation reflex above." >&2
-      continue
-    fi
-
-    goal="$(python3 - "$home_file" "$side" <<'PY'
-import sys, yaml
-d = yaml.safe_load(open(sys.argv[1]))
-q = d[sys.argv[2]]["arm_joint_positions"]
-assert len(q) == 7, "expected 7 joint positions, got %d" % len(q)
-print("{goal_joint_configuration: [%s], maximum_joint_velocities: [%s], goal_tolerance: 0.01}"
-      % (", ".join("%.6f" % v for v in q), ", ".join(["0.15"] * 7)))
-PY
-)" || { echo "  WARNING: could not read $side home pose; skipping." >&2; continue; }
-
-    # inter-arm settle: homing the LEFT arm churns DDS enough that the RIGHT action
-    # server failed to deliver its goal RESPONSE to the local CLI client on 2026-08-23
-    # ("Failed to send goal response ... client will not receive response"). The goal
-    # itself may still be accepted and executed; only the acknowledgement is lost.
-    [ "$side" = "RIGHT" ] && sleep 5
-
-    echo "  homing $ns ..."
-    ros2 control set_controller_state joint_impedance_controller inactive \
-      -c "/$ns/controller_manager" >/dev/null 2>&1 || true
-    # 0.15 rad/s over ~2 rad is ~15 s; 120 s is generous but bounded so a wedged action
-    # server cannot hang the whole bringup.
-    # One retry: a lost goal response is a messaging failure, not a motion failure, and
-    # re-sending an already-satisfied PTP goal is harmless - the arm is already there.
-    for attempt in 1 2; do
-      if timeout 120 ros2 action send_goal "/$ns/action_server/ptp_motion" \
-           franka_msgs/action/PTPMotion "$goal" >/dev/null 2>&1; then
-        echo "    $ns at home."
-        break
-      fi
-      if [ "$attempt" = 1 ]; then
-        echo "    $ns: no result (goal response may have been lost); retrying..."
-        sleep 5
-      else
-        echo "  WARNING: $ns homing did not report success; verify the pose by hand" >&2
-        echo "           before activating impedance control." >&2
-        echo "           /$ns/action_server/error_recovery is available." >&2
-      fi
-    done
-  done
+  # Bounded so a wedged action server can never freeze the bringup: worst case is roughly
+  # discovery (15 s) + two arms * (accept 10 s + motion 30 s).
+  timeout 150 python3 "$script" --file "$home_file" || {
+    echo "  WARNING: homing did not complete cleanly; verify both arm poses by hand" >&2
+    echo "           before activating impedance control." >&2
+  }
   echo
 }
 
 start_spine() {
   start_stage "spine" \
     ros2 launch franka_spine_server spine.launch.py spine_ip:="$spine_ip"
-  wait_for service '/franka_spine_node/get_state' 60 "spine services"
+  wait_for service '/franka_spine_node/get_state' 30 "spine services"
 }
 
 if $skip_arms; then
@@ -419,7 +385,7 @@ start_spine
 # short per-call timeout costs nothing and keeps a wedged manager from burning the whole
 # budget one 20 s call at a time. Override with TMR_CM_CALL_TIMEOUT if a slow companion
 # ever needs more.
-cm_call_timeout="${TMR_CM_CALL_TIMEOUT:-5}"
+cm_call_timeout="${TMR_CM_CALL_TIMEOUT:-3}"
 
 controller_state() {
   local ns="$1" name="$2"
@@ -467,7 +433,7 @@ start_stage "both arms" \
 # minutes of dead wait whenever the manager is unresponsive - and the outcome in that
 # case is a warning either way, so the extra minutes buy nothing. Raise with
 # TMR_CM_SETTLE_TIMEOUT if a spawner ever legitimately needs longer.
-cm_settle_timeout="${TMR_CM_SETTLE_TIMEOUT:-30}"
+cm_settle_timeout="${TMR_CM_SETTLE_TIMEOUT:-15}"
 wait_for_controller left  joint_impedance_controller "$cm_settle_timeout"
 wait_for_controller right joint_impedance_controller "$cm_settle_timeout"
 
@@ -486,14 +452,14 @@ done
 
 # Let the arm managers go quiet before the gripper launch adds two more
 # controller_managers and six spawners.
-sleep 5
+sleep 3
 
 # --------------------------------------------------------------- 3. grippers
 start_stage "both grippers" \
   ros2 launch franka_gripper_manager robotiq_gripper_controller_client.launch.py \
     config_file:=tmr_duo_config_robotiq.yaml
-wait_for topic '/left/gripper/gripper_client/target_gripper_width_percent' 60 "left gripper client"
-wait_for topic '/right/gripper/gripper_client/target_gripper_width_percent' 60 "right gripper client"
+wait_for topic '/left/gripper/gripper_client/target_gripper_width_percent' 30 "left gripper client"
+wait_for topic '/right/gripper/gripper_client/target_gripper_width_percent' 30 "right gripper client"
 
 # ------------------------------------------------------------- 4. home the arms
 if $home_pose; then
