@@ -85,8 +85,9 @@ looks. For the arms, look for this in the robot's terminal:
 libfranka: Move command aborted: motion aborted by reflex! ["communication_constraints_violation"]
 ```
 
-A demoted hardware component does not come back on its own — but it does **not** require a
-full bringup either. See [S11](#s11-fast-recovery-after-a-reflex).
+Recovery is a bringup. A demoted hardware component does not come back on its own, and the
+faster in-place recovery attempted in [S11](#s11-fast-recovery-after-a-reflex) does **not**
+work yet.
 
 ---
 
@@ -217,7 +218,7 @@ Set up `ssh-copy-id companion` once and `start_teleop.bash` will check this auto
 | symptom | cause | fix |
 |---|---|---|
 | Pedals publish, base does not move, nothing logged | `TmrHardware` demoted to `unconfigured` | `base_health.sh`; re-run bringup |
-| An arm stops following its GELLO after hitting a limit | reflex; hardware demoted to `unconfigured` | `python3 ~/recover_arms.py` ([S11](#s11-fast-recovery-after-a-reflex)) — no restart needed |
+| An arm stops following its GELLO after hitting a limit | reflex; hardware demoted to `unconfigured` | unlock joints in Desk if locked, then re-run `start_robot.bash`. In-place recovery is [S11](#s11-fast-recovery-after-a-reflex), **not working yet** |
 | One arm stops following GELLO right after activation | the other arm's activation command | use `activate_arms.py` ([S3](#s3-never-activate-arms-with-two-separate-commands)) |
 | Spine: `424 Client Error: Failed Dependency` on `motion-mm:start` | robot not powered on from Desk after a reboot | open `https://172.16.16.10/` and press **power on**; see [S9](#s9-known-bugs-and-gotchas) |
 | A spawner cannot reach its **own** local `controller_manager` | a Fast DDS profile with `initialPeersList` is loaded | `TMR_DDS_PROFILE` must be empty; see [S9](#s9-known-bugs-and-gotchas) |
@@ -369,7 +370,13 @@ When an arm hits a speed or torque limit, or its FCI loop misses deadlines, libf
 the motion and `ros2_control` demotes `<side>_FrankaHardwareInterface` to `unconfigured`
 while `joint_impedance_controller` still reports `active`. The arm stops following its GELLO.
 
-Restarting `start_robot.bash` fixes it and costs minutes. This is the same repair in seconds:
+> ⚠️ **This does not work yet.** Tried against a real fault on 2026-08-23 and the arm still
+> could not be controlled without re-running `start_robot.bash`. The script and the reasoning
+> are kept below because the mechanism is sound and the missing piece is probably small — but
+> **for now, a full bringup is still the reliable repair.** Do not rely on this section.
+
+Restarting `start_robot.bash` fixes it and costs minutes. This was intended to be the same
+repair in seconds:
 
 ```bash
 python3 ~/recover_arms.py                 # both arms
