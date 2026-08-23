@@ -37,6 +37,9 @@
 #   ./start_teleop.bash -d                    # detach and return to the prompt
 #   ./start_teleop.bash viewer [cmd]          # GUI tool in a throwaway container with X11.
 #                                             # Default rqt_image_view; try `viewer rviz2`.
+#                                             # rviz2 prints libGL/radeonsi errors and then
+#                                             # falls back to software rendering - harmless.
+#                                             # LIBGL_ALWAYS_SOFTWARE=1 skips the failed probes.
 #   ./start_teleop.bash shell                 # a shell INSIDE the Humble container, with
 #                                             # ROS + the workspace sourced. This is where
 #                                             # ros2/rviz2/rqt run - the host is Kilted and
@@ -147,6 +150,7 @@ case "$cmd" in
       $([ -f "$HOME/.Xauthority" ] && echo "-v $HOME/.Xauthority:/tmp/.Xauthority:ro -e XAUTHORITY=/tmp/.Xauthority") \
       -v /dev:/dev -v "$HOME:/workspace" \
       -e ROS_DOMAIN_ID="$ROS_DOMAIN_ID" -e RMW_IMPLEMENTATION=rmw_fastrtps_cpp \
+      ${LIBGL_ALWAYS_SOFTWARE:+-e LIBGL_ALWAYS_SOFTWARE=$LIBGL_ALWAYS_SOFTWARE} \
       -u "$(id -u):20" -e HOME=/tmp "$img" bash -lc \
       "source /opt/ros/humble/setup.bash && cd '$repo_ctr' && source install/setup.bash 2>/dev/null; exec $vcmd"
     ;;

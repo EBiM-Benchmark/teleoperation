@@ -144,8 +144,13 @@ Pick the topic from the dropdown:
 ### Lidar, TF and the robot model
 
 ```bash
-rviz2
+./start_teleop.bash viewer rviz2
 ```
+
+> rviz2 prints `libGL error: ... failed to load driver: radeonsi` and then reports
+> `OpenGl version: 4.5`. That is a **harmless fallback to software rendering** - the
+> container's Mesa does not recognise this AMD chip. LaserScan display is fine on CPU.
+> `LIBGL_ALWAYS_SOFTWARE=1 ./start_teleop.bash viewer rviz2` skips the failed probes.
 
 Set **Fixed Frame** to `base_link` (or `lidar_front` if TF is not being replayed), then
 **Add -> By topic** and pick `/lidar_front/scan` and `/lidar_rear/scan` as LaserScan
