@@ -47,6 +47,7 @@ WHEN A BRINGUP IS STILL REQUIRED
   * Spine 424 after a reboot is not a fault: press power on in Desk.
 """
 import argparse
+import os
 import sys
 
 import rclpy
@@ -61,7 +62,10 @@ from lifecycle_msgs.msg import State
 ARM_CONTROLLER = "joint_impedance_controller"
 BASE_CONTROLLER = "swerve_drive_controller"
 SPINE_URL = "https://172.16.16.10/spine/api/state"
-DISCOVERY_TIMEOUT = 15.0
+# 15 s was too short and produced false "controller_manager not reachable" reports for
+# services that were up: Fast DDS discovery on this network takes 15-25 s. Same class of
+# bug as record_bag.bash needing --spin-time. Override with TMR_DISCOVERY_TIMEOUT.
+DISCOVERY_TIMEOUT = float(os.environ.get("TMR_DISCOVERY_TIMEOUT", "35"))
 CALL_TIMEOUT = 15.0
 RECOVERY_TIMEOUT = 30.0
 

@@ -212,14 +212,50 @@ if ! dex "$prelude && ros2 bag record --help 2>&1 | grep -q mcap" >/dev/null 2>&
   storage=""
 fi
 
-cleanup() { trap - INT TERM; echo; echo "stopping..."; }
+# `docker exec` does NOT forward signals to the process inside the container. Killing this
+# script therefore leaves `ros2 bag record` running and the bag WITHOUT metadata.yaml, which
+# makes it unreadable - observed 2026-08-23: a 124 MB mcap with no metadata, and the recorder
+# still running. SIGINT must be delivered inside the container so rosbag2 finalises.
+cleanup() {
+  trap - INT TERM
+  echo; echo "stopping the recorder inside the container..."
+  docker exec "$CONTAINER" bash -lc 'pkill -INT -f "ros2 bag record"' >/dev/null 2>&1 || true
+  for _ in $(seq 1 20); do
+    docker exec "$CONTAINER" bash -lc 'pgrep -f "ros2 bag record" >/dev/null' 2>/dev/null || break
+    sleep 0.5
+  done
+}
 trap cleanup INT TERM
-docker exec -it -u "$(id -u):20" -e HOME=/tmp "$CONTAINER" bash -lc \
-  "$prelude && exec ros2 bag record $storage -o '$out_ctr' ${topics[*]}" || true
+# -it only when there IS a terminal: `docker exec -it` fails outright with "cannot attach
+# stdin to a TTY-enabled container" when run from a script or CI.
+tty_flags=()
+[ -t 0 ] && tty_flags=(-it)
+# Background + `wait`, NOT a plain foreground call. Bash defers a trap until the current
+# foreground command returns, and `docker exec` never returns on its own - so Ctrl+C was
+# deferred forever and the recorder kept running with the bag left unfinalised. `wait` is
+# interruptible, which lets cleanup() actually run.
+docker exec "${tty_flags[@]}" -u "$(id -u):20" -e HOME=/tmp "$CONTAINER" bash -lc \
+  "$prelude && exec ros2 bag record $storage -o '$out_ctr' ${topics[*]}" &
+rec_pid=$!
+wait "$rec_pid" 2>/dev/null || true
 
 echo
+cleanup
 if [ -d "$out" ]; then
   echo "Bag: $out  ($(du -sh "$out" 2>/dev/null | cut -f1))"
+  if [ ! -f "$out/metadata.yaml" ]; then
+    echo "  WARNING: no metadata.yaml - the bag is unreadable. The recorder was killed" >&2
+    echo "           before it could finalise." >&2
+  fi
+  # A topic can have a PUBLISHER and still carry zero messages - an inactive controller
+  # advertises without ever publishing. --check cannot see that; only the counts can.
+  info="$(dex "source /opt/ros/humble/setup.bash && ros2 bag info '$out_ctr' 2>/dev/null" || true)"
+  empty="$(grep -oE "Topic: [^ ]+ \| Type: [^ ]+ \| Count: 0 " <<<"$info" | awk '{print $2}' || true)"
+  if [ -n "$empty" ]; then
+    echo
+    echo "  TOPICS WITH ZERO MESSAGES - these will fail the LeRobot conversion:" >&2
+    printf '    %s\n' $empty >&2
+  fi
   echo "Inspect with:"
   echo "  docker exec -u $(id -u):20 -e HOME=/tmp $CONTAINER bash -lc \\"
   echo "    'source /opt/ros/humble/setup.bash && ros2 bag info $out_ctr'"

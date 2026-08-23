@@ -53,6 +53,7 @@ ros2 daemon stop >/dev/null 2>&1 || true
 
 skip_arms=false
 home_pose=true
+sensors=true
 activate=true
 home_file="${TMR_HOME_POSE:-$HOME/teleop_home_pose.yaml}"
 restart=false
@@ -62,8 +63,9 @@ for arg in "$@"; do
     # Stop any already-running robot stacks instead of refusing to start.
     --restart)   restart=true ;;
     --no-home)   home_pose=false ;;
+    --no-sensors) sensors=false ;;
     --no-activate) activate=false ;;
-    *) echo "Usage: $0 [--skip-arms] [--restart] [--no-home] [--no-activate]" >&2; exit 2 ;;
+    *) echo "Usage: $0 [--skip-arms] [--restart] [--no-home] [--no-activate] [--no-sensors]" >&2; exit 2 ;;
   esac
 done
 
@@ -193,9 +195,20 @@ fi
 # -------------------------------------------------------------------- lifecycle
 launch_pids=()
 launch_names=()
+# Sensors go here instead of launch_pids. They are stopped on exit like everything else, but
+# their liveness is NOT monitored: on 2026-08-23 a ZED that could not find its camera exited,
+# wait_any_launch saw the stage die, and the EXIT trap tore down the ENTIRE robot - base,
+# arms, grippers and spine - because one camera was unplugged. A sensor must never do that.
+aux_pids=()
+aux_names=()
 
 stop_all() {
   trap - EXIT INT TERM
+  # Sensors first: they are pure publishers, and stopping them early quiets the graph while
+  # the control stacks shut down.
+  for pid in "${aux_pids[@]:-}"; do
+    [ -n "$pid" ] && kill -TERM -- "-$pid" 2>/dev/null || true
+  done
   for pid in "${launch_pids[@]}"; do
     kill -TERM -- "-$pid" 2>/dev/null || true
   done
@@ -262,6 +275,20 @@ wait_for() {
   echo "  WARNING: timed out waiting for $what ($kind matching '$pattern')." >&2
   echo "           Continuing anyway - verify by hand before relying on it." >&2
   return 0
+}
+
+# Like start_stage, but the process is not monitored for liveness - see aux_pids.
+start_aux_stage() {
+  local name="$1"; shift
+  echo "Starting $name..."
+  setsid "$@" &
+  aux_pids+=($!)
+  aux_names+=("$name")
+  sleep 2
+  if ! kill -0 "${aux_pids[-1]}" 2>/dev/null; then
+    echo "  WARNING: $name exited immediately; continuing without it." >&2
+    return 0
+  fi
 }
 
 start_stage() {
@@ -369,6 +396,37 @@ home_arms() {
   echo
 }
 
+# ZED head camera + both SICK nanoScan2 lidars.
+#
+# Deliberately FIRST, before any FCI loop is running. Bringing a driver up is a 15-25 s DDS
+# discovery burst on this network, and such a burst aborts control loops that are already
+# running - that is what has been tripping communication_constraints_violation all along.
+# With the sensors up front, their discovery is finished before the arms or base exist.
+#
+# Bandwidth is fine despite the ZED being uncompressed: head_camera_zed_params.yaml sets
+# pub_downscale_factor 2.0 and pub_frame_rate 15 with depth off, so it is ~640x360x15,
+# roughly 10 MB/s - not the ~80 MB/s an untuned HD720@30 stream would be.
+#
+# start_cameras:=false because default_sensor_suite.yaml declares four D455s and only three
+# are plugged in; the camera launch would fail on the missing one. The two WRIST cameras are
+# not here at all - they run on the laptop, in a Docker container.
+start_sensors() {
+  if [ -x "$HOME/start_zed.bash" ]; then
+    start_aux_stage "ZED head camera" "$HOME/start_zed.bash"
+    wait_for topic '/head_camera/zed_node/rgb/image_rect_color' 40 "ZED rgb"
+  else
+    echo "  WARNING: ~/start_zed.bash not found; skipping the head camera." >&2
+  fi
+
+  start_aux_stage "base lidars" \
+    ros2 launch franka_mobile_sensors franka_mobile_sensors.launch.py \
+      start_cameras:=false start_lidars:=true start_rviz:=false
+  # Topic names come from the namespaces in default_sensor_suite.yaml. wait_for is
+  # non-fatal, so a wrong guess warns rather than tearing the robot down.
+  wait_for topic '/lidar_front/scan' 40 "front lidar"
+  wait_for topic '/lidar_rear/scan' 40 "rear lidar"
+}
+
 start_spine() {
   start_stage "spine" \
     ros2 launch franka_spine_server spine.launch.py spine_ip:="$spine_ip"
@@ -387,7 +445,12 @@ if $skip_arms; then
   exit $?
 fi
 
-# ------------------------------------------------------------------ 1. spine
+# ---------------------------------------------------------------- 1. sensors
+if $sensors; then
+  start_sensors
+fi
+
+# ------------------------------------------------------------------ 2. spine
 start_spine
 
 # Controller state via the list_controllers SERVICE, not `ros2 control`. The CLI
@@ -433,7 +496,7 @@ wait_for_controller() {
   return 0
 }
 
-# ------------------------------------------------------------------- 2. arms
+# ------------------------------------------------------------------- 3. arms
 start_stage "both arms" \
   ros2 launch franka_fr3_arm_controllers franka_fr3_arm_controllers.launch.py \
     robot_config_file:=tmr_duo_config.yaml
@@ -467,23 +530,23 @@ done
 # controller_managers and six spawners.
 sleep 3
 
-# --------------------------------------------------------------- 3. grippers
+# --------------------------------------------------------------- 4. grippers
 start_stage "both grippers" \
   ros2 launch franka_gripper_manager robotiq_gripper_controller_client.launch.py \
     config_file:=tmr_duo_config_robotiq.yaml
 wait_for topic '/left/gripper/gripper_client/target_gripper_width_percent' 30 "left gripper client"
 wait_for topic '/right/gripper/gripper_client/target_gripper_width_percent' 30 "right gripper client"
 
-# ------------------------------------------------------------- 4. home the arms
+# ------------------------------------------------------------- 5. home the arms
 if $home_pose; then
   home_arms
 fi
 
-# --------------------------------------------------------------- 4. base (LAST)
+# --------------------------------------------------------------- 6. base (LAST)
 # Deliberately after the arms and grippers; see start_base above.
 start_base
 
-# ----------------------------------------------------------- 5. activate the arms
+# ----------------------------------------------------------- 7. activate the arms
 # Runs LAST, after the base, because that is the order proven to work by hand. Activation
 # puts each arm's FCI into Move mode, and doing it before the base is up has repeatedly
 # aborted whichever loop was already running.
