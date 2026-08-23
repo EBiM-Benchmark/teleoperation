@@ -119,7 +119,7 @@ embodiment:
         rgb:
           # Published by the Jetson Orin. Launch the stock zed_wrapper there with
           # camera_name:=head_camera to reproduce this exact name.
-          topic: /head_camera/zed_node/rgb/image_rect_color
+          topic: /head_camera/zed_node/rgb/color/rect/image
 
     - id: wrist_left
       type: REALSENSE_CAMERA

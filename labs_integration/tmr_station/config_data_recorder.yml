@@ -55,4 +55,4 @@ ros_topics:
   # schema being exactly sensor_msgs/msg/Image.
   - '/wrist_camera_left/camera/color/image_raw'
   - '/wrist_camera_right/camera/color/image_raw'
-  - '/head_camera/zed_node/rgb/image_rect_color'
+  - '/head_camera/zed_node/rgb/color/rect/image'

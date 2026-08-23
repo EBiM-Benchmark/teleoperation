@@ -72,7 +72,11 @@ ACTION_TOPICS=(
 VIDEO_TOPICS=(
   /wrist_camera_left/camera/color/image_raw
   /wrist_camera_right/camera/color/image_raw
-  /head_camera/zed_node/rgb/image_rect_color
+  # NOT rgb/image_rect_color. This zed_wrapper build advertises the rectified colour image
+  # as rgb/color/rect/image - verified against the running node 2026-08-23. LABS'
+  # config_data_recorder.yml and config_station.yml still carry the old name and would
+  # silently record no head camera at all.
+  /head_camera/zed_node/rgb/color/rect/image
 )
 # Not in the LABS manifest; recorded for our own use. Names inferred from the namespaces in
 # franka_mobile_sensors' default_sensor_suite.yaml - verify with --check.
