@@ -15,6 +15,9 @@ controlling data collection.
 > Jetson, bring-up order, and a first-run checklist. The sections below are the per-subsystem
 > reference it links into.
 
+> 📼 **Recording datasets? See [`docs/DATA_COLLECTION.md`](docs/DATA_COLLECTION.md)** for the
+> record-and-verify loop and how to play a bag back in rviz2 / rqt_image_view / rqt_plot.
+
 > ▶️ **Running it day to day? Use [`docs/RUNBOOK.md`](docs/RUNBOOK.md).** The startup order
 > is load-bearing — laptop first, then the robot, then `activate_arms.py` — and getting it
 > wrong produces a *silent* failure where every controller reports `active` while the robot

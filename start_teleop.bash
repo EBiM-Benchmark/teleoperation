@@ -148,7 +148,17 @@ if ! container_running; then
   docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
   # privileged + host network: privileged for /dev (GELLO serial, evdev foot switches),
   # host network because DDS discovery to the robot must not be NATed.
+  # X11 passthrough so rviz2 / rqt_image_view can display on the host. Harmless when there
+  # is no display (the vars are simply empty). GL works because this container is
+  # privileged with /dev mounted, so it reaches /dev/dri; without that, rviz2 connects to
+  # the X server and then fails at "libGL error: glx: failed to create dri3 screen".
+  x11_args=()
+  if [ -d /tmp/.X11-unix ] && [ -n "${DISPLAY:-}" ]; then
+    x11_args=(-e "DISPLAY=$DISPLAY" -e QT_X11_NO_MITSHM=1 -v /tmp/.X11-unix:/tmp/.X11-unix)
+    [ -f "$HOME/.Xauthority" ] && x11_args+=(-v "$HOME/.Xauthority:/tmp/.Xauthority:ro" -e XAUTHORITY=/tmp/.Xauthority)
+  fi
   docker run -d --name "$CONTAINER" --privileged --network host --init \
+    "${x11_args[@]}" \
     -v "$HOME:/workspace" \
     -v /dev/serial/by-id:/dev/serial/by-id \
     -e ROS_DOMAIN_ID="$ROS_DOMAIN_ID" -e RMW_IMPLEMENTATION=rmw_fastrtps_cpp \

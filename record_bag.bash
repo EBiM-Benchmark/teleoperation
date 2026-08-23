@@ -23,6 +23,7 @@
 #
 # USAGE
 #   ./record_bag.bash --check              # what is publishing? changes nothing
+#   ./record_bag.bash --info               # inspect the most recent bag
 #   ./record_bag.bash                      # record everything, Ctrl+C to stop
 #   ./record_bag.bash --no-video           # state/action/lidar only (low bandwidth)
 #   ./record_bag.bash --out DIR            # default ~/teleop_bags/<timestamp>
@@ -98,6 +99,7 @@ mode=record; want_video=true; out=""; name=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --check)    mode=check; shift ;;
+    --info)     mode=info; shift ;;
     --no-video) want_video=false; shift ;;
     --out)      out="$2"; shift 2 ;;
     --name)     name="$2"; shift 2 ;;
@@ -146,6 +148,33 @@ dex()  { docker exec -u "$(id -u):20" -e HOME=/tmp "$CONTAINER" bash -lc "$1"; }
   echo "ERROR: container '$CONTAINER' is not running. Start it with ./start_teleop.bash" >&2
   exit 1
 }
+
+# --info inspects a bag on disk and touches the ROS graph not at all, so it is safe to run
+# while the robot is live - unlike --check, which creates a participant.
+if [ "$mode" = info ]; then
+  bag="${out:-$(ls -dt "$HOME"/teleop_bags/*/ 2>/dev/null | head -1)}"
+  [ -n "$bag" ] || { echo "No bags found in ~/teleop_bags" >&2; exit 1; }
+  bag="${bag%/}"
+  echo "Bag: $bag  ($(du -sh "$bag" 2>/dev/null | cut -f1))"
+  [ -f "$bag/metadata.yaml" ] || echo "  WARNING: no metadata.yaml - the recorder was killed before finalising." >&2
+  info="$(dex "source /opt/ros/humble/setup.bash && ros2 bag info '/workspace/${bag#"$HOME"/}' 2>&1" || true)"
+  echo "$info" | grep -E "Duration|Start|End|Messages|Bag size|Storage"
+  echo
+  echo "Topics by message count:"
+  echo "$info" | grep -oE "Topic: [^ ]+ \| Type: [^ ]+ \| Count: [0-9]+" \
+    | sed -E 's/Topic: ([^ ]+) \| Type: [^ ]+ \| Count: ([0-9]+)/\2 \1/' \
+    | sort -rn | awk '{printf "  %10s  %s\n", $1, $2}'
+  empty="$(echo "$info" | grep -oE "Topic: [^ ]+ \| Type: [^ ]+ \| Count: 0 " | awk '{print $2}' || true)"
+  if [ -n "$empty" ]; then
+    echo
+    echo "  ZERO-MESSAGE TOPICS - these fail the LeRobot conversion:" >&2
+    printf '    %s\n' $empty >&2
+    exit 1
+  fi
+  echo
+  echo "  No empty topics."
+  exit 0
+fi
 
 # ------------------------------------------------------------------- check
 # One `ros2 topic list` for the whole manifest: a topic list per topic would be a DDS
