@@ -42,6 +42,7 @@ ros2 daemon stop >/dev/null 2>&1 || true
 
 skip_arms=false
 home_pose=true
+activate=true
 home_file="${TMR_HOME_POSE:-$HOME/teleop_home_pose.yaml}"
 restart=false
 for arg in "$@"; do
@@ -50,7 +51,8 @@ for arg in "$@"; do
     # Stop any already-running robot stacks instead of refusing to start.
     --restart)   restart=true ;;
     --no-home)   home_pose=false ;;
-    *) echo "Usage: $0 [--skip-arms] [--restart] [--no-home]" >&2; exit 2 ;;
+    --no-activate) activate=false ;;
+    *) echo "Usage: $0 [--skip-arms] [--restart] [--no-home] [--no-activate]" >&2; exit 2 ;;
   esac
 done
 
@@ -469,6 +471,38 @@ fi
 # --------------------------------------------------------------- 4. base (LAST)
 # Deliberately after the arms and grippers; see start_base above.
 start_base
+
+# ----------------------------------------------------------- 5. activate the arms
+# Runs LAST, after the base, because that is the order proven to work by hand. Activation
+# puts each arm's FCI into Move mode, and doing it before the base is up has repeatedly
+# aborted whichever loop was already running.
+#
+# ~/activate_arms.py uses ONE DDS participant for both arms and discovers both services
+# before switching either. Two separate `ros2 control` calls kill the first arm - the
+# second call's discovery burst aborts it about 3 s in. Never replace this with two calls.
+#
+# THIS MAKES THE ARMS LIVE: they begin following the GELLOs immediately.
+if $activate; then
+  activate_script="${TMR_ACTIVATE_SCRIPT:-$HOME/activate_arms.py}"
+  if [ ! -f "$activate_script" ]; then
+    echo "  WARNING: $activate_script not found; activate the arms by hand." >&2
+  else
+    echo
+    echo "=============================================================="
+    echo " ABOUT TO ACTIVATE BOTH ARMS - they will follow the GELLOs."
+    echo " Hands OFF the GELLOs: the GELLO/arm pose delta is captured at"
+    echo " this instant, and movement now becomes an approach target."
+    echo " Ctrl+C to skip (--no-activate disables this permanently)."
+    echo "=============================================================="
+    for i in 3 2 1; do printf "\r  activating in %ss... " "$i"; sleep 1; done
+    echo
+    # Bounded: discovery 15 s + two switch calls at 10 s, plus slack.
+    timeout 60 python3 "$activate_script" || {
+      echo "  WARNING: activation did not complete; run it by hand:" >&2
+      echo "           python3 $activate_script" >&2
+    }
+  fi
+fi
 
 cat <<'MSG'
 

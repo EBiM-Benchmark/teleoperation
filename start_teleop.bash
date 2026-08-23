@@ -170,7 +170,19 @@ if [ -x "$repo_host/configs/sync_robot_clock.sh" ] \
   skew_line="$("$repo_host/configs/sync_robot_clock.sh" --check 2>/dev/null | grep robot || true)"
   [ -n "$skew_line" ] && echo "Clock:$skew_line"
   case "$skew_line" in
-    *NEEDS\ CORRECTION*) echo "  -> run ./configs/sync_robot_clock.sh, or the base will ignore cmd_vel silently." >&2 ;;
+    *NEEDS\ CORRECTION*)
+      # auto-sync: skew > 0.5 s makes the base silently discard cmd_vel and the arms reject
+      # GELLO samples, with nothing logged. Correcting it is not optional, so do not make
+      # the operator remember it. Passwordless via /usr/local/sbin/tmr-set-clock on the
+      # robot; without that sudoers rule this falls back to prompting, so it is bounded.
+      echo "  correcting..."
+      if timeout 90 "$repo_host/configs/sync_robot_clock.sh" </dev/null 2>&1 | grep -E "robot is|Clock synced"; then
+        :
+      else
+        echo "  -> automatic sync failed. Run ./configs/sync_robot_clock.sh by hand," >&2
+        echo "     or the base will ignore cmd_vel silently." >&2
+      fi
+      ;;
   esac
 else
   echo "Clock: skipped (no passwordless ssh to ${TMR_HOST:-companion})."

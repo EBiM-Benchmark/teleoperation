@@ -133,12 +133,21 @@ for ((round = 1; round <= MAX_ROUNDS; round++)); do
     # One ssh -t, so the single sudo authentication covers every step. chronyd is stopped
     # first because it disciplines the clock and will otherwise partially undo the step;
     # it is restarted afterwards so the robot is left as we found it.
-    ssh -t "$HOST" "sudo bash -c '
-        systemctl stop chrony 2>/dev/null || systemctl stop chronyd 2>/dev/null || true
-        date -s \"\$(date -d \"${delta} seconds\" --rfc-3339=ns)\" >/dev/null
-        hwclock -w 2>/dev/null || true
-        systemctl start chrony 2>/dev/null || systemctl start chronyd 2>/dev/null || true
-    '" </dev/tty || { echo "ERROR: correction command failed" >&2; exit 1; }
+    # Preferred path: a narrow NOPASSWD helper installed by
+    # /etc/sudoers.d/tmr-clock. No password, no tty, so bringup can correct skew
+    # unattended. It validates its own argument because it runs as root.
+    if ssh -o BatchMode=yes "$HOST" "sudo -n /usr/local/sbin/tmr-set-clock $delta" >/dev/null 2>&1; then
+        :
+    else
+        # Fallback: the original interactive path. sudo caches credentials PER TTY, so a
+        # separate `sudo -v` does not help - the whole correction runs inside one `ssh -t`.
+        ssh -t "$HOST" "sudo bash -c '
+            systemctl stop chrony 2>/dev/null || systemctl stop chronyd 2>/dev/null || true
+            date -s \"\$(date -d \"${delta} seconds\" --rfc-3339=ns)\" >/dev/null
+            hwclock -w 2>/dev/null || true
+            systemctl start chrony 2>/dev/null || systemctl start chronyd 2>/dev/null || true
+        '" </dev/tty || { echo "ERROR: correction command failed" >&2; exit 1; }
+    fi
 
     sleep 2
     skew=$(measure_skew) || { echo "ERROR: could not re-measure skew" >&2; exit 1; }

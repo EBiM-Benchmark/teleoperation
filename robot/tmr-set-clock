@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# Apply a clock correction to THIS machine (the TMR companion).
+#
+# Installed to /usr/local/sbin/tmr-set-clock and allowed without a password by
+# /etc/sudoers.d/tmr-clock, so teleop bringup can correct skew unattended.
+#
+# WHY THIS NEEDS TO BE AUTOMATIC
+# Skew above 0.5 s makes SwerveDriveController silently discard cmd_vel and
+# JointImpedanceController reject GELLO samples - with nothing logged anywhere. The robot
+# simply ignores every command while looking healthy, so this must not depend on anyone
+# remembering to run it.
+#
+# Takes ONE argument: a signed delta in seconds, e.g. +0.421337 or -1.2
+# The new time is computed HERE from this machine's own clock, so the value cannot go stale
+# while ssh connects. Sending a laptop timestamp instead is how an earlier attempt left the
+# clock 4 s out.
+#
+# The argument is validated strictly: this runs as root without a password, so anything
+# that is not a plain signed decimal is refused before it reaches `date`.
+set -euo pipefail
+
+delta="${1:-}"
+if ! [[ "$delta" =~ ^[+-]?[0-9]+(\.[0-9]+)?$ ]]; then
+  echo "usage: $(basename "$0") <signed-seconds>   e.g. +0.421337" >&2
+  exit 2
+fi
+
+# chronyd disciplines the clock frequency and partially undoes a manual step, so stop it for
+# the correction and put it back afterwards, leaving the robot as we found it.
+systemctl stop chrony 2>/dev/null || systemctl stop chronyd 2>/dev/null || true
+date -s "$(date -d "$delta seconds" --rfc-3339=ns)" >/dev/null
+hwclock -w 2>/dev/null || true
+systemctl start chrony 2>/dev/null || systemctl start chronyd 2>/dev/null || true
+
+echo "clock adjusted by ${delta}s"

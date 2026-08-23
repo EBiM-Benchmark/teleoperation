@@ -51,3 +51,33 @@ done
 After that, `git pull` on the robot is the deployment step and edits are committed where
 they are made. This has **not** been done yet — the robot has no clone of this repo, and
 setting one up needs git credentials on that machine.
+
+## Passwordless clock correction (one-time setup)
+
+Clock skew over 0.5 s makes the base silently discard `cmd_vel` and the arms reject GELLO
+samples, with nothing logged — so `start_teleop.bash` now checks and corrects it
+automatically. Correcting needs root on the robot, and prompting for a password defeats the
+point, so a **narrow** rule allows exactly one script:
+
+```bash
+# 1. laptop -> robot key auth, so no password for the measurement half
+ssh-copy-id companion
+
+# 2. install the helper + sudoers rule (asks for the robot password ONCE)
+scp robot/tmr-set-clock robot/tmr-clock-sudoers companion:/tmp/
+ssh -t companion 'sudo install -m 0755 -o root -g root /tmp/tmr-set-clock /usr/local/sbin/tmr-set-clock &&
+                  sudo install -m 0440 -o root -g root /tmp/tmr-clock-sudoers /etc/sudoers.d/tmr-clock &&
+                  sudo visudo -cf /etc/sudoers.d/tmr-clock &&
+                  rm -f /tmp/tmr-set-clock /tmp/tmr-clock-sudoers && echo INSTALLED'
+
+# 3. verify - should print a skew line with no prompt
+./configs/sync_robot_clock.sh --check
+```
+
+`tmr-set-clock` takes one signed-seconds argument and **validates it strictly**, because it
+runs as root without a password. `sync_robot_clock.sh` prefers it and falls back to the old
+interactive path when it is absent.
+
+> The robot password is deliberately **not** stored anywhere in this repo. Key auth plus this
+> one rule achieves the same "no prompt" result without a secret on disk, which would
+> otherwise end up committed or copied.
