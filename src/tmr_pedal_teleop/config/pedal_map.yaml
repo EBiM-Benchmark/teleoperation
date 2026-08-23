@@ -112,7 +112,15 @@ mobile_base_state_bridge:
     #   ros2 topic info /swerve_drive_controller/odometry
     # LABS drops /tf at dataset-build time, so this is the only path by which base pose
     # reaches an exported episode.
-    odom_topic: "/swerve_drive_controller/odometry"
+    # VERIFIED on hardware 2026-08-23: the controller publishes "odom", not "odometry".
+    #   /swerve_drive_controller/odom      [nav_msgs/msg/Odometry] 1 publisher
+    #   /swerve_drive_controller/odometry  [nav_msgs/msg/Odometry] 1 subscriber  <- us
+    # Subscribing to the wrong name fails silently: mobile_base_state_bridge is
+    # event-driven, so it simply never fires and /mobile_base/pose + /mobile_base/twist
+    # publish NOTHING. --check still shows them present, because the bridge advertises
+    # them; only the recorded message count (0) reveals it. That is 13 of the 62 state
+    # dimensions silently missing from every episode.
+    odom_topic: "/swerve_drive_controller/odom"
     pose_topic: "/mobile_base/pose"
     twist_topic: "/mobile_base/twist"
 

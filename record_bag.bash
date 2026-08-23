@@ -90,7 +90,8 @@ EXTRA_TOPICS=(
   /tf_static
   /pedal/state
   /teleop/pedal_mode
-  /swerve_drive_controller/odometry
+  # 'odom', not 'odometry' - verified on hardware 2026-08-23.
+  /swerve_drive_controller/odom
 )
 
 mode=record; want_video=true; out=""; name=""

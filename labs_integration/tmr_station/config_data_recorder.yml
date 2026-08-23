@@ -43,7 +43,7 @@ ros_topics:
   # ---- Archived only -------------------------------------------------------
   # Present in the MCAP but absent from config_station.yml, so dataset-builder logs
   # "outside configured manifest" and skips them. Useful for offline debugging.
-  - '/swerve_drive_controller/odometry'
+  - '/swerve_drive_controller/odom'
   - '/pedal/state'
   - '/teleop/pedal_mode'
 

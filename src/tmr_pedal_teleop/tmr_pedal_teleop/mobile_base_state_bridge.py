@@ -10,7 +10,7 @@ The input topic name is a parameter because it has to be confirmed against the l
 robot::
 
     ros2 topic list | grep -i swerve
-    ros2 topic info /swerve_drive_controller/odometry
+    ros2 topic info /swerve_drive_controller/odom
 """
 
 import rclpy
@@ -23,7 +23,7 @@ class MobileBaseStateBridge(Node):
     def __init__(self):
         super().__init__("mobile_base_state_bridge")
 
-        self.declare_parameter("odom_topic", "/swerve_drive_controller/odometry")
+        self.declare_parameter("odom_topic", "/swerve_drive_controller/odom")
         self.declare_parameter("pose_topic", "/mobile_base/pose")
         self.declare_parameter("twist_topic", "/mobile_base/twist")
 
