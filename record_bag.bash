@@ -260,15 +260,19 @@ cleanup() {
   done
 }
 trap cleanup INT TERM
-# -it only when there IS a terminal: `docker exec -it` fails outright with "cannot attach
-# stdin to a TTY-enabled container" when run from a script or CI.
-tty_flags=()
-[ -t 0 ] && tty_flags=(-it)
+# NO -it, deliberately. Backgrounding a command redirects its stdin to /dev/null, so
+# `docker exec -it ... &` fails with "cannot attach stdin to a TTY-enabled container because
+# stdin is not a terminal" EVEN FROM an interactive shell - the -t check on the parent shell
+# says nothing about the backgrounded child. And the exec must be backgrounded, because bash
+# defers traps until the foreground command returns and `docker exec` never returns.
+#
+# A TTY is not needed anyway: Ctrl+C is handled by cleanup(), which sends SIGINT to the
+# recorder INSIDE the container. Output still streams without -t.
 # Background + `wait`, NOT a plain foreground call. Bash defers a trap until the current
 # foreground command returns, and `docker exec` never returns on its own - so Ctrl+C was
 # deferred forever and the recorder kept running with the bag left unfinalised. `wait` is
 # interruptible, which lets cleanup() actually run.
-docker exec "${tty_flags[@]}" -u "$(id -u):20" -e HOME=/tmp "$CONTAINER" bash -lc \
+docker exec -u "$(id -u):20" -e HOME=/tmp "$CONTAINER" bash -lc \
   "$prelude && exec ros2 bag record $storage -o '$out_ctr' ${topics[*]}" &
 rec_pid=$!
 wait "$rec_pid" 2>/dev/null || true
