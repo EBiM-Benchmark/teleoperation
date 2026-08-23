@@ -11,7 +11,7 @@ following their GELLOs, both Robotiq grippers, arms auto-homed at bringup.
 > `communication_constraints_violation` reflex has recurred after a working session. The
 > procedure below removes the *known* triggers (startup order, two-command arm activation,
 > ad-hoc graph queries, orphan buildup), but the underlying cause — three 1 kHz FCI streams
-> sharing one NIC with all DDS traffic — is **not fixed**. See [S9](#s9-robot-side-changes-2026-08-23).
+> sharing one NIC with all DDS traffic — is **not fixed**. See [S10](#s10-robot-side-changes-2026-08-23).
 > Expect to re-run the bringup, and check [S2](#s2-the-silent-failure-you-must-be-able-to-recognise)
 > before concluding the robot is healthy.
 
@@ -217,18 +217,81 @@ Set up `ssh-copy-id companion` once and `start_teleop.bash` will check this auto
 |---|---|---|
 | Pedals publish, base does not move, nothing logged | `TmrHardware` demoted to `unconfigured` | `base_health.sh`; re-run bringup |
 | One arm stops following GELLO right after activation | the other arm's activation command | use `activate_arms.py` ([S3](#s3-never-activate-arms-with-two-separate-commands)) |
+| A spawner cannot reach its **own** local `controller_manager` | a Fast DDS profile with `initialPeersList` is loaded | `TMR_DDS_PROFILE` must be empty; see [S9](#s9-known-bugs-and-gotchas) |
+| `Unverified HTTPS request ... 172.16.16.10` | Desk's self-signed cert, from the spine server | ignore - it is a warning, not an error |
+| `https://172.16.16.10/` will not open | control units powered off; ARP fails | check robot power, E-stop, and the switch link lights |
 | Base dies ~2 s after the arms come up | base started before the arms | base must start **last**; `start_robot.bash` does this |
 | Nothing moves, no errors anywhere | clock skew > 0.5 s | [S7](#s7-clock-skew) |
 | `ros2 node list` empty, services time out, topics visible | Kilted host talking to a Humble robot | use the container ([S6](#s6-laptop-side-start_teleopbash)) |
 | `Could not open port /dev/serial/by-id/...` | container user lacks **dialout** | `start_teleop.bash` uses `uid:20`; check the host ACL too |
 | `no candidate device found` for the foot switches | udev rule missing | install `configs/99-pcsensor-footswitch.rules`; only `MODE="0666"` matters, the switches are autodetected by vendor:product |
-| Load climbing across restarts, reflexes more frequent | orphaned nodes from earlier runs | `start_robot.bash --restart` now sweeps them ([S9](#s9-robot-side-changes-2026-08-23)) |
+| Load climbing across restarts, reflexes more frequent | orphaned nodes from earlier runs | `start_robot.bash --restart` now sweeps them ([S10](#s10-robot-side-changes-2026-08-23)) |
 | `wait: <pid>: no such job` and everything shuts down | a launch stage died | fixed: it now names the stage |
 | `franka_robot_state_broadcaster` fails to activate | known, wrong `arm_id`; teleop does not use it | ignore |
 
 ---
 
-## S9. Robot-side changes (2026-08-23)
+## S9. Known bugs and gotchas
+
+### The WiFi DDS profile breaks local discovery — keep it OFF
+
+`~/fastdds_wifi.xml` is **opt-in and currently broken.** Its `initialPeersList` destroys the
+robot's own **local** node discovery: unicast initial peers probe only a small range of
+participant indices per address, and this robot runs well over a dozen participants. The
+symptom is a spawner failing to reach a controller_manager on the *same machine*:
+
+```
+[spawner-3] Could not contact service /left/gripper/controller_manager/list_controllers
+```
+
+This bit twice. `start_robot.bash` shipped briefly with that profile as its **default**, so
+every bringup reintroduced the fault unless someone remembered to pass `TMR_DDS_PROFILE=""`
+by hand — and the docs meanwhile described the profile as "not in use", which was wrong.
+
+Fixed in `5a78c47`: the default is now empty (plain all-interface discovery, which works).
+Confirm at bringup — the script prints one of these near the top:
+
+```
+DDS: default discovery (all interfaces).                      <- correct
+DDS: /home/tmr-user/fastdds_wifi.xml (WiFi only; ...)         <- WRONG, expect breakage
+```
+
+Do not enable it until the profile is fixed **and tested on throwaway nodes** rather than on
+the live bringup path.
+
+### After a robot reboot
+
+The DDS-profile bug above shows up on the **first bringup after a reboot**, which makes it
+easy to blame the reboot. It is not the reboot — the profile was loaded on every bringup.
+
+What *does* survive a reboot, verified 2026-08-23 (18 min uptime):
+
+| | |
+|---|---|
+| `/usr/local/sbin/tmr-set-clock` + `/etc/sudoers.d/tmr-clock` | survive |
+| laptop→robot ssh key auth | survives |
+| clock accuracy | **survives** — measured 0.011 s straight after reboot |
+
+The clock surviving is not luck: `tmr-set-clock` runs `hwclock -w`, so a correction is
+written to the hardware clock and restored at boot. Without that the companion would come up
+skewed every time, since it has no reachable NTP source.
+
+Still worth running `./configs/sync_robot_clock.sh --check` after a reboot — it is instant
+and passwordless now.
+
+### Editing the script does not fix a running stack
+
+`FASTRTPS_DEFAULT_PROFILES_FILE` is read into each node's environment at launch. Changing
+the script changes nothing for processes already running — a restart is required.
+
+### Ctrl+\ is not a better Ctrl+C
+
+`Ctrl+\` (SIGQUIT) produces `Quit (core dumped)` on the `wait` and skips the orderly
+shutdown. Use `Ctrl+C`, which lets the EXIT trap stop the stages in order.
+
+---
+
+## S10. Robot-side changes (2026-08-23)
 
 These run **on the robot**, and are now versioned in [`../robot/`](../robot/). Deploy and
 compare them with `./robot/deploy.bash` (`--check` to diff, `--pull` to capture edits made
