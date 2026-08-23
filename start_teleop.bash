@@ -78,7 +78,15 @@ done
 #
 # Escape hatch: TMR_DDS_PROFILE="" for default all-interface discovery, or a path to
 # another profile. It must live under $HOME to be visible inside the container.
-dds_host="${TMR_DDS_PROFILE-$repo_host/configs/fastdds_laptop_wifi.xml}"
+# DEFAULT IS EMPTY: all-interface discovery, matching the robot side (fixed in 5a78c47).
+#
+# This used to default to configs/fastdds_laptop_wifi.xml, which pins DDS to the WiFi
+# address ONLY. That silently partitioned the laptop: teleop on 192.168.50.117 could
+# not see the wrist cameras, which pin to the wired 172.16.16.140 - so no single
+# `ros2 bag record` could ever capture both. Reserving the wired link for FCI is still
+# the right idea, but it needs every participant on a matching profile, which is not
+# the case today. Opt in with TMR_DDS_PROFILE=<path> once that is sorted.
+dds_host="${TMR_DDS_PROFILE-}"
 dds_env=""
 if [ -n "$dds_host" ]; then
   [ -f "$dds_host" ] || { echo "ERROR: DDS profile not found: $dds_host" >&2; exit 1; }
@@ -148,6 +156,15 @@ if ! container_running; then
 fi
 
 # These are pip-installed into the running container, so they do NOT survive `docker rm`.
+# rosbag2's mcap storage plugin, needed by record_bag.bash: LABS' lerobot_mcap_reader
+# consumes MCAP, and the sqlite3 default would need a re-encode before conversion. Like the
+# pip deps below, an apt install into the running container does NOT survive `docker rm`.
+if ! dex 'ls /opt/ros/humble/share | grep -q rosbag2_storage_mcap' >/dev/null 2>&1; then
+  echo "Installing rosbag2 mcap storage into the container..."
+  docker exec -u 0 "$CONTAINER" bash -lc \
+    "apt-get update -qq && apt-get install -y -qq ros-humble-rosbag2-storage-mcap" >/dev/null 2>&1 || true
+fi
+
 if ! dex 'python3 -c "import evdev, dynamixel_sdk, requests"' >/dev/null 2>&1; then
   echo "Installing missing Python deps into the container..."
   docker exec -u 0 "$CONTAINER" bash -lc \

@@ -44,11 +44,16 @@ STATE_TOPICS=(
   /left/franka_robot_state_broadcaster/measured_joint_states
   /left/franka_robot_state_broadcaster/external_joint_torques
   /left/franka_robot_state_broadcaster/external_wrench_in_stiffness_frame
-  /left/gripper/gripper_joint_states
+  # NOT gripper_joint_states: robotiq_controllers.yaml nests `publish_topic` inside the
+  # controller_manager ros__parameters block, where the broadcaster never reads it, so the
+  # name never takes effect. Verified on hardware 2026-08-23 - the real topic is
+  # joint_states. LABS' config_data_recorder.yml still says gripper_joint_states and would
+  # therefore silently drop both gripper state columns.
+  /left/gripper/joint_states
   /right/franka_robot_state_broadcaster/measured_joint_states
   /right/franka_robot_state_broadcaster/external_joint_torques
   /right/franka_robot_state_broadcaster/external_wrench_in_stiffness_frame
-  /right/gripper/gripper_joint_states
+  /right/gripper/joint_states
   /mobile_base/pose
   /mobile_base/twist
   /swerve_drive_controller/cmd_vel_out
@@ -103,10 +108,32 @@ $want_video && topics+=("${VIDEO_TOPICS[@]}")
 required=("${STATE_TOPICS[@]}" "${ACTION_TOPICS[@]}")
 $want_video && required+=("${VIDEO_TOPICS[@]}")
 
+# DEFAULT TRANSPORTS, deliberately - everything must share one transport world.
+#
+# The wrist cameras used to run with useBuiltinTransports=false and UDP whitelisted to the
+# wired 172.16.16.140. A default-transport participant then could not discover them AT ALL:
+# their topics were simply absent, with no error. Pinning the recorder to match found the
+# cameras but lost the teleop nodes instead, and adding SHM did not bridge the two - SHM
+# cannot cross a container boundary, and the cameras run in their own container with their
+# own /dev/shm. The fix was on the camera side: drop its custom profile so it uses the same
+# default transports as the robot stack and the teleop nodes.
+#
+# Opt into a profile with TMR_DDS_PROFILE=<path>, but check what it does to discovery first.
+dds_host="${TMR_DDS_PROFILE-}"
+dds_env=""
+if [ -n "$dds_host" ]; then
+  [ -f "$dds_host" ] || { echo "ERROR: DDS profile not found: $dds_host" >&2; exit 1; }
+  case "$dds_host" in
+    "$HOME"/*) dds_ctr="/workspace/${dds_host#"$HOME"/}" ;;
+    *) echo "ERROR: DDS profile must live under \$HOME to be visible in the container" >&2; exit 1 ;;
+  esac
+  dds_env="&& export FASTRTPS_DEFAULT_PROFILES_FILE='$dds_ctr' FASTDDS_DEFAULT_PROFILES_FILE='$dds_ctr'"
+fi
+
 prelude="source /opt/ros/humble/setup.bash \
   && source /opt/ros/humble/franka/setup.bash \
   && cd '$repo_ctr' && source install/setup.bash \
-  && export ROS_DOMAIN_ID=$ROS_DOMAIN_ID RMW_IMPLEMENTATION=rmw_fastrtps_cpp PYTHONUNBUFFERED=1"
+  && export ROS_DOMAIN_ID=$ROS_DOMAIN_ID RMW_IMPLEMENTATION=rmw_fastrtps_cpp PYTHONUNBUFFERED=1 $dds_env"
 
 dex()  { docker exec -u "$(id -u):20" -e HOME=/tmp "$CONTAINER" bash -lc "$1"; }
 
@@ -118,8 +145,17 @@ dex()  { docker exec -u "$(id -u):20" -e HOME=/tmp "$CONTAINER" bash -lc "$1"; }
 # ------------------------------------------------------------------- check
 # One `ros2 topic list` for the whole manifest: a topic list per topic would be a DDS
 # discovery burst per call, and those bursts abort running FCI control loops.
-echo "Discovering topics on domain $ROS_DOMAIN_ID (Fast DDS is slow here, ~15-25 s)..."
-live="$(dex "$prelude && timeout 60 ros2 topic list --no-daemon 2>/dev/null" || true)"
+echo "Discovering topics on domain $ROS_DOMAIN_ID (spinning ${TMR_SPIN_TIME:-25}s; Fast DDS is slow here)..."
+# `ros2 topic list -v`, not plain list: a bare list includes topics that only have a
+# SUBSCRIBER, so a robot-side controller listening for /left/gello/joint_states made the
+# topic look healthy while nothing published it. Only the "Published topics:" section counts.
+# --spin-time is essential, not a nicety. `ros2 topic list` spins ~1 s by default and
+# then reports, but Fast DDS discovery on this machine takes 15-25 s, so the default
+# reports a half-discovered graph: nodes that were definitely publishing showed up as
+# MISSING while a latched topic happened to arrive in time.
+spin="${TMR_SPIN_TIME:-25}"
+raw="$(dex "$prelude && timeout $((spin + 45)) ros2 topic list -v --spin-time $spin --no-daemon 2>/dev/null" || true)"
+live="$(awk '/^Published topics:/{p=1;next} /^Subscribed topics:/{p=0} p && /^ \* /{print $2}' <<<"$raw")"
 if [ -z "$live" ]; then
   echo "ERROR: no topics discovered at all. Is anything running?" >&2
   exit 1

@@ -131,8 +131,23 @@ class Unit:
     def report(self):
         hw = self.hardware()
         name = next(iter(hw), "?")
+        # claimed interfaces are the real test. A controller can sit at `active` holding
+        # NOTHING - which is what an activate() on an already-active controller leaves
+        # behind, since on_activate() never re-runs. It looks healthy and drives nothing.
+        n = self.claimed_count()
         return (f"  {self.label:<6} hardware={hw.get(name, 'unknown'):<12} "
-                f"{self.controller}={self.controller_state()}")
+                f"{self.controller}={self.controller_state():<9} claimed={n}"
+                + ("  <-- ACTIVE BUT DRIVING NOTHING" if n == 0 else ""))
+
+    def claimed_count(self):
+        res = spin_until(self.node, self.list_ct.call_async(ListControllers.Request()),
+                         CALL_TIMEOUT)
+        if not res:
+            return -1
+        for c in res.controller:
+            if c.name == self.controller:
+                return len(getattr(c, "claimed_interfaces", []))
+        return -1
 
     def recover(self, activate=True) -> bool:
         log = self.node.get_logger()
@@ -141,14 +156,10 @@ class Unit:
         if name is None:
             log.error(f"{self.label}: no hardware component found")
             return False
-        log.info(f"{self.label}: hardware '{name}' is '{hw[name]}', "
-                 f"{self.controller} is '{self.controller_state()}'")
+        log.info(f"{self.label}: hardware '{hw[name]}', {self.controller} "
+                 f"'{self.controller_state()}', claimed={self.claimed_count()}")
 
-        # 1. release the command interfaces
-        if self._switch(deactivate=[self.controller]):
-            log.info(f"{self.label}: {self.controller} deactivated")
-
-        # 2. clear the reflex on the robot itself
+        # 1. clear the reflex on the robot first
         if self.recovery and self.recovery.server_is_ready():
             gh = spin_until(self.node, self.recovery.send_goal_async(ErrorRecovery.Goal()),
                             CALL_TIMEOUT)
@@ -159,8 +170,12 @@ class Unit:
             else:
                 log.info(f"{self.label}: error_recovery done")
 
-        # 3. only needed when read() failed and the component was demoted
-        if self.hardware().get(name) != "active":
+        # 2. hardware BEFORE the controller. A controller cannot be deactivated while its
+        #    hardware is missing, and an earlier version tried the deactivate first: it
+        #    failed silently, so the later activate() hit an already-active controller and
+        #    did NOTHING. on_activate() never re-ran, no poses were captured, no control
+        #    loop started - and the script still reported success.
+        if hw[name] != "active":
             for chain in ([("active", State.PRIMARY_STATE_ACTIVE)],
                           [("inactive", State.PRIMARY_STATE_INACTIVE),
                            ("active", State.PRIMARY_STATE_ACTIVE)]):
@@ -174,20 +189,39 @@ class Unit:
                 if self.hardware().get(name) == "active":
                     break
             if self.hardware().get(name) != "active":
-                log.error(f"{self.label}: hardware is '{self.hardware().get(name)}', not active. "
-                          f"If Desk shows the joints locked, unlock them and re-run; "
+                log.error(f"{self.label}: hardware stuck at '{self.hardware().get(name)}'. "
+                          f"Unlock the joints in Desk if they are locked, then re-run; "
                           f"otherwise restart start_robot.bash.")
                 return False
             log.info(f"{self.label}: hardware active again")
 
-        # 4. fresh control loop
         if not activate:
-            log.info(f"{self.label}: leaving {self.controller} inactive (--no-activate)")
+            self._switch(deactivate=[self.controller])
+            log.info(f"{self.label}: left inactive (--no-activate)")
             return True
-        if self._switch(activate=[self.controller]):
-            log.info(f"{self.label}: {self.controller} active")
+
+        # 3. force a REAL cycle. Activating an already-active controller is a no-op, so the
+        #    deactivate must be confirmed before the activate means anything.
+        if self.controller_state() == "active":
+            self._switch(deactivate=[self.controller])
+            if self.controller_state() == "active":
+                log.error(f"{self.label}: could not deactivate {self.controller}; "
+                          f"cannot force a fresh control loop. Restart start_robot.bash.")
+                return False
+            log.info(f"{self.label}: {self.controller} deactivated")
+
+        # 4. activate - this re-enters perform_command_mode_switch(), which calls
+        #    initialize<Mode>Interface() and starts a FRESH libfranka control loop.
+        self._switch(activate=[self.controller])
+
+        # 5. VERIFY BY CLAIMED INTERFACES, not by the reported state. `active` with zero
+        #    claimed interfaces is the silent failure this whole runbook is about.
+        n = self.claimed_count()
+        if self.controller_state() == "active" and n > 0:
+            log.info(f"{self.label}: {self.controller} active, claimed={n}")
             return True
-        log.error(f"{self.label}: could not activate {self.controller}")
+        log.error(f"{self.label}: {self.controller} is '{self.controller_state()}' with "
+                  f"claimed={n} - it is driving nothing. Restart start_robot.bash.")
         return False
 
 
