@@ -303,6 +303,17 @@ ros2 launch franka_gripper_manager robotiq_gripper_controller_client.launch.py \
 
 ## 7. Start the laptop side
 
+> ▶️ **There is now one command for this: `./start_teleop.bash`** (foreground, live logs,
+> Ctrl+C stops both stacks). It starts the GELLO and pedal stacks, handles the container,
+> device permissions, Python deps, the Humble build and a clock check. The manual commands
+> below remain the reference for what it does.
+>
+> ⚠ **The `pixi shell` path below is stale for this laptop.** It runs ROS 2 **Kilted** while
+> the robot runs **Humble**, and ROS 2 does not support cross-distro communication — from
+> the host, `ros2 node list` comes back empty and every `controller_manager` service call
+> times out while topics partially discover. `start_teleop.bash` therefore runs the nodes in
+> the Humble devcontainer image. See [`RUNBOOK.md`](RUNBOOK.md) S6.
+
 Every terminal: inside `pixi shell`, with `source install/setup.bash` and
 `source configs/tmr_laptop_env.sh`.
 

@@ -15,6 +15,12 @@ controlling data collection.
 > Jetson, bring-up order, and a first-run checklist. The sections below are the per-subsystem
 > reference it links into.
 
+> ▶️ **Running it day to day? Use [`docs/RUNBOOK.md`](docs/RUNBOOK.md).** The startup order
+> is load-bearing — laptop first, then the robot, then `activate_arms.py` — and getting it
+> wrong produces a *silent* failure where every controller reports `active` while the robot
+> ignores every command. The runbook explains the order, how to recognise that failure, and
+> what not to do while teleop is running.
+
 ## Package Overview
 * **franka_gello_state_publisher** - Reads the states of the Franka GELLO devices and publishes the joint states of the left arm, right arm, and grippers.
 * **franka_gello_state_subscriber** - Subscribes to the published GELLO states for testing or for subsequent integration with robot control.
@@ -642,10 +648,27 @@ ros2 launch franka_gello_state_publisher main.launch.py config_file:=franka_gell
 > and the first update becomes an approach target, traversed at
 > `motion_generator_speed_factor` (0.05, deliberately slow).
 >
-> The controller also spawns `--inactive` by design, so activation is an explicit gate:
-> `ros2 control set_controller_state joint_impedance_controller active -c /left/controller_manager`
+> The controller also spawns `--inactive` by design, so activation is an explicit gate.
+> Activate **both arms from one process**, on the robot:
+>
+> ```bash
+> python3 ~/activate_arms.py
+> ```
+>
+> ⚠ Do **not** run `ros2 control set_controller_state` twice, once per arm. Each CLI call
+> creates a new DDS participant, and participant discovery here is a 15–25 s exchange on a
+> link already carrying three 1 kHz FCI streams. That burst aborts the arm that is *already*
+> active. Measured 2026-08-23: LEFT activated at t=457671.9, LEFT reflex at 457674.7,
+> RIGHT activated at 457675.2 — the left arm was killed by the command that started the
+> right one. `activate_arms.py` waits for both services before switching either.
+> See [`docs/RUNBOOK.md`](docs/RUNBOOK.md) S3.
 
 ## Start both arms from the home pose
+
+> ℹ️ **This is now automatic.** `~/start_robot.bash` homes both arms after the grippers and
+> before the base, reading `~/teleop_home_pose.yaml`. It warns and counts down 5 s first;
+> `--no-home` disables it. The manual procedure below still applies if you skip it or need
+> to re-home mid-session.
 
 **Both arms must be at the agreed home pose before you activate teleop.** The impedance
 controller maps GELLO→arm as a *delta* from the poses captured at `on_activate`, so the arm
