@@ -217,6 +217,7 @@ Set up `ssh-copy-id companion` once and `start_teleop.bash` will check this auto
 |---|---|---|
 | Pedals publish, base does not move, nothing logged | `TmrHardware` demoted to `unconfigured` | `base_health.sh`; re-run bringup |
 | One arm stops following GELLO right after activation | the other arm's activation command | use `activate_arms.py` ([S3](#s3-never-activate-arms-with-two-separate-commands)) |
+| Spine: `424 Client Error: Failed Dependency` on `motion-mm:start` | robot not powered on from Desk after a reboot | open `https://172.16.16.10/` and press **power on**; see [S9](#s9-known-bugs-and-gotchas) |
 | A spawner cannot reach its **own** local `controller_manager` | a Fast DDS profile with `initialPeersList` is loaded | `TMR_DDS_PROFILE` must be empty; see [S9](#s9-known-bugs-and-gotchas) |
 | `Unverified HTTPS request ... 172.16.16.10` | Desk's self-signed cert, from the spine server | ignore - it is a warning, not an error |
 | `https://172.16.16.10/` will not open | control units powered off; ARP fails | check robot power, E-stop, and the switch link lights |
@@ -278,6 +279,23 @@ skewed every time, since it has no reachable NTP source.
 
 Still worth running `./configs/sync_robot_clock.sh --check` after a reboot — it is instant
 and passwordless now.
+
+**What does NOT survive: the robot's power-on state.** After a reboot or power cycle you
+must press **power on** in TMR Desk (`https://172.16.16.10/`, self-signed cert, accept the
+browser warning) before anything will move. Skip it and the spine fails with:
+
+```
+[franka_spine_node]: Failed to start motion: 424 Client Error: Failed Dependency
+                     for url: https://172.16.16.10/spine/api/motion-mm:start
+```
+
+Pressing power on recovers the spine automatically — no restart of the ROS stacks needed.
+
+> ⚠ **Do not diagnose this from `/spine/api/state`.** It reports `"SwitchedOn"` **both**
+> when motion works and when it fails with 424, so it looks healthy either way. The limits
+> endpoint is equally unhelpful — the target is well inside `0–770 mm`. The `424` itself is
+> the signal, and Desk is the fix. Verified 2026-08-23: state `"SwitchedOn"`, position
+> `353 mm`, identical before and after the power-on that fixed it.
 
 ### Editing the script does not fix a running stack
 
