@@ -26,10 +26,21 @@ export ROS_DOMAIN_ID="${TMR_ROS_DOMAIN_ID:-0}"
 # Escape hatch: TMR_DDS_PROFILE="" falls back to default all-interface discovery,
 # TMR_DDS_PROFILE=/path/to.xml uses another profile.
 export RMW_IMPLEMENTATION="${RMW_IMPLEMENTATION:-rmw_fastrtps_cpp}"
-export FASTRTPS_DEFAULT_PROFILES_FILE="${TMR_DDS_PROFILE-$HOME/fastdds_wifi.xml}"
+# DEFAULT IS EMPTY: default all-interface discovery, which is what actually works.
+#
+# ~/fastdds_wifi.xml is OPT-IN and currently BROKEN: its initialPeersList destroys the
+# robot's own LOCAL discovery, because unicast initial peers probe only a small range of
+# participant indices per address and this robot runs well over a dozen participants. The
+# symptom is spawners unable to contact their own controller_manager:
+#   [spawner-3] Could not contact service /left/gripper/controller_manager/list_controllers
+#
+# Reserving the wired link for FCI is still the right idea - see docs/RUNBOOK.md S9 - but
+# do not enable this until the profile is fixed and tested on throwaway nodes:
+#   TMR_DDS_PROFILE=$HOME/fastdds_wifi.xml ~/start_robot.bash --restart
+export FASTRTPS_DEFAULT_PROFILES_FILE="${TMR_DDS_PROFILE-}"
 if [ -z "$FASTRTPS_DEFAULT_PROFILES_FILE" ]; then
   unset FASTRTPS_DEFAULT_PROFILES_FILE
-  echo "DDS: default discovery (all interfaces) - TMR_DDS_PROFILE was set empty."
+  echo "DDS: default discovery (all interfaces)."
 elif [ ! -f "$FASTRTPS_DEFAULT_PROFILES_FILE" ]; then
   echo "ERROR: DDS profile not found: $FASTRTPS_DEFAULT_PROFILES_FILE" >&2
   exit 1

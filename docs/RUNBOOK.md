@@ -256,11 +256,23 @@ The underlying fragility is that three 1 kHz FCI streams share one USB-Ethernet 
 (`192.168.50.x`, both machines are on "Instinct Office"), wired reserved for FCI - remains
 the principled fix.
 
-An attempt on 2026-08-23 **failed and was reverted**: adding `initialPeersList` broke the
-robot's own local discovery, because unicast initial peers only probe a small range of
-participant indices per address and the robot runs well over a dozen participants. The
-profile files remain for a future attempt. Revert either side with `TMR_DDS_PROFILE=""` -
-no file edits needed.
+An attempt on 2026-08-23 **failed**: adding `initialPeersList` broke the robot's own local
+discovery, because unicast initial peers only probe a small range of participant indices per
+address and the robot runs well over a dozen participants. The symptom is a spawner unable
+to reach its **own** controller_manager:
+
+```
+[spawner-3] Could not contact service /left/gripper/controller_manager/list_controllers
+```
+
+`start_robot.bash` shipped briefly with that profile as its **default**, which reintroduced
+the fault on every bringup unless `TMR_DDS_PROFILE=""` was passed by hand. The default is
+now empty - plain all-interface discovery, which works. The profile is opt-in and should
+stay off until it is fixed and tested on throwaway nodes:
+
+```bash
+TMR_DDS_PROFILE=$HOME/fastdds_wifi.xml ~/start_robot.bash --restart   # do not, yet
+```
 
 Do **not** "fix" this by lowering the base `controller_manager` `update_rate` (1000 Hz, in
 `franka_ros2/franka_bringup/config/controllers.yaml`). The base **is** the 1 kHz consumer;
