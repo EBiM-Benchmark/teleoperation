@@ -118,9 +118,22 @@ Everything below subscribes to the replay exactly as if the robot were live. Use
 > ⚠ Replay publishes on the **same topics as the live robot**. Do it with the robot stack
 > **down**, or a replayed `/swerve_drive_controller/cmd_vel` will drive the real base.
 
+> **Quickest path for any GUI tool** - no container shell needed, and it does not disturb a
+> running teleop stack:
+>
+> ```bash
+> ./start_teleop.bash viewer            # rqt_image_view
+> ./start_teleop.bash viewer rviz2
+> ./start_teleop.bash viewer rqt_plot
+> ```
+>
+> It runs a throwaway container with X11 wired up. Running these on the HOST fails with
+> `ros2: command not found` - the host is Kilted and cannot see Humble topics.
+
 ### Camera images
 
 ```bash
+./start_teleop.bash viewer            # or, from inside a container shell:
 ros2 run rqt_image_view rqt_image_view
 ```
 

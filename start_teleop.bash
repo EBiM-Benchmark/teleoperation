@@ -35,6 +35,8 @@
 #                                             # keyboard_state_publisher gets a TTY and
 #                                             # 'm' / w,a,s,d,q,e work
 #   ./start_teleop.bash -d                    # detach and return to the prompt
+#   ./start_teleop.bash viewer [cmd]          # GUI tool in a throwaway container with X11.
+#                                             # Default rqt_image_view; try `viewer rviz2`.
 #   ./start_teleop.bash shell                 # a shell INSIDE the Humble container, with
 #                                             # ROS + the workspace sourced. This is where
 #                                             # ros2/rviz2/rqt run - the host is Kilted and
@@ -57,10 +59,11 @@ case "$repo_host" in
   *) echo "ERROR: expected the repo under \$HOME ($HOME), got $repo_host" >&2; exit 1 ;;
 esac
 
-cmd=start; record=false; task_id=""; pedal_fg=false; log_which=""; detach=false
+cmd=start; record=false; task_id=""; pedal_fg=false; log_which=""; detach=false; viewer_cmd=""
 while [ $# -gt 0 ]; do
   case "$1" in
     start|stop|status|shell) cmd="$1"; shift ;;
+    viewer) cmd=viewer; shift; viewer_cmd="$*"; set -- ;;
     logs) cmd=logs; shift; case "${1:-}" in gello|pedal) log_which="$1"; shift ;; esac ;;
     --record)   record=true; shift ;;
     --task-id)  task_id="$2"; record=true; shift 2 ;;
@@ -128,6 +131,25 @@ stop_stacks() {
 case "$cmd" in
   stop)
     stop_stacks; echo "Laptop teleop stacks stopped (container '$CONTAINER' left running)."; exit 0 ;;
+  viewer)
+    # A SEPARATE, throwaway container so GUI work never disturbs a running teleop stack, and
+    # so it works even when the main container predates the X11 passthrough. --privileged +
+    # /dev because rviz2 needs /dev/dri for GL; without it you get
+    # "libGL error: glx: failed to create dri3 screen".
+    [ -n "${DISPLAY:-}" ] || { echo "ERROR: no DISPLAY set - nothing to draw on." >&2; exit 1; }
+    img="$(docker inspect "$CONTAINER" --format '{{.Config.Image}}' 2>/dev/null || echo "$IMAGE")"
+    vcmd="${viewer_cmd:-ros2 run rqt_image_view rqt_image_view}"
+    echo "Viewer container: $vcmd    (close the window to exit)"
+    exec docker run --rm --network host --privileged \
+      -e DISPLAY="$DISPLAY" -e QT_X11_NO_MITSHM=1 \
+      -v /tmp/.X11-unix:/tmp/.X11-unix \
+      ${XAUTH_ARGS:+$XAUTH_ARGS} \
+      $([ -f "$HOME/.Xauthority" ] && echo "-v $HOME/.Xauthority:/tmp/.Xauthority:ro -e XAUTHORITY=/tmp/.Xauthority") \
+      -v /dev:/dev -v "$HOME:/workspace" \
+      -e ROS_DOMAIN_ID="$ROS_DOMAIN_ID" -e RMW_IMPLEMENTATION=rmw_fastrtps_cpp \
+      -u "$(id -u):20" -e HOME=/tmp "$img" bash -lc \
+      "source /opt/ros/humble/setup.bash && cd '$repo_ctr' && source install/setup.bash 2>/dev/null; exec $vcmd"
+    ;;
   shell)
     container_running || { echo "ERROR: container '$CONTAINER' is not running. Run ./start_teleop.bash first." >&2; exit 1; }
     if ! docker exec "$CONTAINER" bash -lc '[ -d /tmp/.X11-unix ]' 2>/dev/null; then
