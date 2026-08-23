@@ -6,7 +6,12 @@ ws_dir="${TMR_WS:-$HOME/tams_ws}"
 params_file="$ws_dir/config/head_camera_zed_params.yaml"
 dds_file="$ws_dir/config/fastdds.xml"
 
-export ROS_DOMAIN_ID="${TMR_ROS_DOMAIN_ID:-100}"
+# Domain 0, like everything else: start_robot.bash, start_teleop.bash,
+# configs/tmr_laptop_env.sh and the LABS docker-compose all use 0. This defaulted to
+# 100, which put the ZED on its own domain where nothing else could see it - a single
+# `ros2 bag record` sees exactly one domain, so the head camera could never be recorded
+# alongside the arms. Override with TMR_ROS_DOMAIN_ID if you really need to isolate it.
+export ROS_DOMAIN_ID="${TMR_ROS_DOMAIN_ID:-0}"
 export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
 export FASTRTPS_DEFAULT_PROFILES_FILE="$dds_file"
 export FASTDDS_DEFAULT_PROFILES_FILE="$dds_file"
