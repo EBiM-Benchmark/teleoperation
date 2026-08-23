@@ -197,7 +197,47 @@ with `rclpy`, which needs no extra dependency.
 
 ---
 
-## 6. Known gaps
+## 6. Wrist cameras publish nothing (open, 2026-08-23)
+
+Both D405s stream **cleanly in `realsense-viewer`** and the USB layer is healthy (both at
+5000 Mbps, zero faults), but their ROS topics deliver no frames: `--check` finds the
+publishers, `ros2 topic hz` sees nothing, and recordings capture `Count: 0`. The head camera
+is unaffected.
+
+Ruled out by testing: the cameras, the cables, the USB ports, the QoS profile (a subscriber
+matching `RELIABLE` + `TRANSIENT_LOCAL` exactly still receives nothing), and `enable_depth`.
+
+The leading suspect is the **DDS send buffer**. Each frame is 640x480x3 = **0.92 MB**,
+fragmented over many UDP datagrams at 30 Hz (27.6 MB/s), and this laptop is only half tuned:
+
+```bash
+sysctl net.core.rmem_max   # 2147483647  - already tuned
+sysctl net.core.wmem_max   #    4194304  - NOT tuned
+```
+
+`labs_integration/labs-tmr-integration.patch` sets both, and says why:
+
+> *Send side too: Ubuntu's default wmem_max is 212992 B, so setsockopt silently clamps the
+> sendBufferSize configured in the DDS profile without it.*
+
+That fits the symptom exactly - small messages (discovery, joint states) get through while
+large ones are dropped with no error - and explains why the ZED is fine: it publishes from
+the **robot**, whose buffers are tuned separately.
+
+```bash
+sudo sysctl -w net.core.wmem_max=2147483647
+docker restart realsense-camera-wrist
+```
+
+Not yet confirmed. If it works, make it persistent in `/etc/sysctl.d/`. If it does not, the
+next suspect is the `KEEP_LAST(1)` depth on those camera topics - a queue of one leaves a
+fragmented 0.92 MB sample no slack.
+
+> Only one process may hold a D405. Stop the container before running `realsense-viewer`,
+> or it fails with `xioctl(VIDIOC_S_FMT) failed, errno=5` - which looks like a hardware
+> fault and is not one.
+
+## 7. Known gaps
 
 * **The D455 base cameras are unplugged.** They drew 2160 mA and starved the ZED (512 mA) on
   a shared port until it looped on `CAMERA REBOOTING`. They were unused anyway - the sensor
