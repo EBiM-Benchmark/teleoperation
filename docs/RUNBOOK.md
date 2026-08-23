@@ -20,15 +20,16 @@ following their GELLOs, both Robotiq grippers, arms auto-homed at bringup.
 ## S1. The startup order is not optional
 
 ```bash
-# 1. LAPTOP - GELLO leaders + foot pedals
+# 1. LAPTOP - GELLO leaders + foot pedals. Also checks and CORRECTS clock skew.
 cd ~/teleoperation && ./start_teleop.bash
 
-# 2. ROBOT - spine, arms, grippers, home the arms, then the base LAST
+# 2. ROBOT - spine, arms, grippers, home the arms, base LAST, then activate both arms
 ~/start_robot.bash --restart
-
-# 3. ROBOT - activate BOTH arms from ONE process
-python3 ~/activate_arms.py
 ```
+
+That is the whole procedure. Clock correction, arm homing and arm activation used to be
+separate steps people forgot; they now run inside those two commands. Opt out per stage with
+`--no-home`, `--no-activate`, or `--skip-arms` (base + spine only).
 
 Each step is ordered for a reason, and every reason is the same one: **a new DDS
 participant is a 15-25 s discovery burst on this network, and such a burst aborts any
@@ -38,7 +39,7 @@ Franka FCI control loop that is already running.**
 |---|---|
 | laptop first | its 8 nodes finish joining the graph while the robot's FCI loops are still down |
 | base last | the base survived every arm/gripper bringup only once it started after them |
-| `activate_arms.py` | one participant for both arms; see [S3](#s3-never-activate-arms-with-two-separate-commands) |
+| `activate_arms.py` | one participant for both arms, run automatically at the end of step 2; see [S3](#s3-never-activate-arms-with-two-separate-commands) |
 
 ### Shutdown: robot first, then laptop
 
