@@ -126,9 +126,26 @@ def generate_robot_nodes(context):
     # forward the complete hardware identifier to the broadcaster controller.
     # controller_manager's spawner parses --param-file using the controller's
     # base name, not its fully-qualified namespaced node name.
+    # franka_robot_state_broadcaster takes robot_type and arm_prefix - it has NO arm_id
+    # parameter. It builds the interface name itself (franka_robot_state_broadcaster.cpp):
+    #     full_prefix = arm_prefix.empty() ? "" : arm_prefix + "_"
+    #     interface   = full_prefix + robot_type + "/robot_state"
+    # so the left arm needs arm_prefix "left" + robot_type "fr3v2" -> "left_fr3v2/robot_state".
+    #
+    # Passing "arm_id" here did nothing: the controller ignores unknown parameters, so BOTH
+    # defaults applied (robot_type "fr3", arm_prefix "") and activation failed with
+    #     State interface with key 'fr3/robot_state' does not exist
+    # That cost all six broadcaster topics - 20 of the 62 state dimensions in a recorded
+    # episode. Harmless for teleoperation, which reads ros2_control state interfaces
+    # directly, but fatal for datasets. Verified activating on both arms 2026-08-23.
     broadcaster_params = {
-        "franka_robot_state_broadcaster": {
-            "ros__parameters": {"arm_id": hardware_arm_id}
+        "/**": {
+            "franka_robot_state_broadcaster": {
+                "ros__parameters": {
+                    "robot_type": arm_id,
+                    "arm_prefix": arm_prefix,
+                }
+            }
         }
     }
     with tempfile.NamedTemporaryFile(
