@@ -364,51 +364,65 @@ slowing it makes deadline misses worse.
 
 ---
 
-## S11. Fast recovery after a reflex
+## S11. Recovery: `recover.py`
 
-When an arm hits a speed or torque limit, or its FCI loop misses deadlines, libfranka aborts
-the motion and `ros2_control` demotes `<side>_FrankaHardwareInterface` to `unconfigured`
-while `joint_impedance_controller` still reports `active`. The arm stops following its GELLO.
-
-> ⚠️ **This does not work yet.** Tried against a real fault on 2026-08-23 and the arm still
-> could not be controlled without re-running `start_robot.bash`. The script and the reasoning
-> are kept below because the mechanism is sound and the missing piece is probably small — but
-> **for now, a full bringup is still the reliable repair.** Do not rely on this section.
-
-Restarting `start_robot.bash` fixes it and costs minutes. This was intended to be the same
-repair in seconds:
+**One script for every in-place recovery** — both arms, the base, and a spine check.
 
 ```bash
-python3 ~/recover_arms.py                 # both arms
-python3 ~/recover_arms.py --side left     # just the one that died
-python3 ~/recover_arms.py --no-activate   # recover, but leave the controller inactive
+python3 ~/recover.py               # everything
+python3 ~/recover.py --check       # report only, changes nothing
+python3 ~/recover.py --side left   # one arm
+python3 ~/recover.py --arms        # skip the base
 ```
 
-Three steps per arm, all through **one** DDS participant:
+`--check` prints the whole robot at a glance and is always safe to run:
 
-| | |
-|---|---|
-| 1 | `/<side>/action_server/error_recovery` → libfranka `automaticErrorRecovery()`, clears the reflex |
-| 2 | `set_hardware_component_state` → `<side>_FrankaHardwareInterface` back to `active` (via `inactive` if a direct jump is refused) |
-| 3 | `switch_controller` → `joint_impedance_controller` active again |
+```
+left   hardware=active       joint_impedance_controller=active
+right  hardware=active       joint_impedance_controller=active
+base   hardware=active       swerve_drive_controller=active
+spine  state="SwitchedOn"
+```
 
-It reports each hardware state as it goes, and skips an arm that is already `active`.
+### The check that misleads
 
-### When this is not enough
+Two failures look alike and need different handling:
 
-`automaticErrorRecovery()` cannot clear an error that requires **manual intervention** — a
-joint limit violation locks the brakes. If Desk shows the joints locked:
+| | what ros2_control does | what you see |
+|---|---|---|
+| Speed/torque limit, or a missed FCI deadline | **nothing** — `read()` keeps succeeding | hardware `active`, controller `active`, arm will not move |
+| `read()` itself fails | demotes the component | hardware `unconfigured`, interfaces `[unavailable]` |
 
-1. unlock the joints in TMR Desk (`https://172.16.16.10/`)
-2. then run `recover_arms.py`
+The first is the common one, and it is why **hardware `active` proves nothing**. An earlier
+version of this script skipped its work whenever the hardware read `active`, and so reported
+success having done nothing at all. Recovery now runs unconditionally.
 
-That ordering is the shortcut worth knowing: **unlocking in Desk does not by itself require
-restarting the bash script.** Only if `recover_arms.py` still reports the hardware as
-something other than `active` do you need a full bringup.
+### What it does
 
-### Why it is one script and not three commands
+1. **deactivate** the controller — it holds the command interfaces, and
+   `perform_command_mode_switch()` calls `stopRobot()` on the way out
+2. **`error_recovery`** — libfranka `automaticErrorRecovery()`, clears the reflex
+3. **re-enable the hardware** — only needed in the demoted case
+4. **activate** the controller — re-enters `perform_command_mode_switch()`, which calls
+   `initialize<Mode>Interface()` and starts a **fresh** control loop
 
-Running the three steps as separate `ros2` invocations would create three DDS participants,
-and each participant's 15–25 s discovery burst can abort whichever arm is still running —
-turning a one-arm problem into a two-arm one. Same reason
-[`activate_arms.py`](#s3-never-activate-arms-with-two-separate-commands) exists.
+Step 4 is the point. The aborted Move command is never resumed on its own, so clearing the
+reflex alone is not enough — something has to start a new control loop.
+
+All of it runs through **one DDS participant**. As separate `ros2` commands it would be one
+participant per call, and each 15–25 s discovery burst can abort whichever arm is still
+running — turning a one-arm problem into a two-arm one.
+
+Hands **off** the GELLOs while it runs: step 4 re-captures the GELLO/arm pose delta.
+
+### When a bringup is still required
+
+* A joint limit violation **locks the brakes**, and `automaticErrorRecovery()` cannot clear
+  an error needing manual intervention. Unlock the joints in Desk, then re-run this —
+  **unlocking alone does not require restarting the bash script.**
+* If the hardware still will not reach `active`, restart `start_robot.bash`.
+* A spine `424` after a reboot is not a fault: press **power on** in Desk ([S9](#s9-known-bugs-and-gotchas)).
+
+> Status: the `--check` path is verified. The repair path is **not yet confirmed against a
+> real fault** — the previous attempt failed because of the `active`-means-healthy bug above.
+> Report what it prints the next time an arm goes offline.
