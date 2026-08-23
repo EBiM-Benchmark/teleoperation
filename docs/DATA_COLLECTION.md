@@ -95,9 +95,15 @@ windows appear on your desktop.
 A shell inside the container, used by everything below:
 
 ```bash
-docker exec -it -u $(id -u):20 -e HOME=/tmp gello-humble bash -lc \
-  'source /opt/ros/humble/setup.bash && cd /workspace/teleoperation && source install/setup.bash && exec bash'
+./start_teleop.bash shell
 ```
+
+It warns if the container has no X11 socket and tells you how to recreate it. Note that
+your `$HOME` is mounted at `/workspace`, so bags are at `/workspace/teleop_bags/...` inside.
+
+> Running `ros2 ...` on the **host** will not work. The host is ROS 2 Kilted while the robot
+> and the bags are Humble; cross-distro, `ros2 node list` returns empty and service calls
+> time out. That is why everything runs in the container.
 
 ### Replay the bag
 

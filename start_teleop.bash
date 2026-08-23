@@ -35,6 +35,10 @@
 #                                             # keyboard_state_publisher gets a TTY and
 #                                             # 'm' / w,a,s,d,q,e work
 #   ./start_teleop.bash -d                    # detach and return to the prompt
+#   ./start_teleop.bash shell                 # a shell INSIDE the Humble container, with
+#                                             # ROS + the workspace sourced. This is where
+#                                             # ros2/rviz2/rqt run - the host is Kilted and
+#                                             # cannot talk to the robot or to a Humble bag.
 #   ./start_teleop.bash stop | status | logs [gello|pedal]
 #
 # By default it stays in the FOREGROUND following both logs; Ctrl+C stops both stacks.
@@ -56,7 +60,7 @@ esac
 cmd=start; record=false; task_id=""; pedal_fg=false; log_which=""; detach=false
 while [ $# -gt 0 ]; do
   case "$1" in
-    start|stop|status) cmd="$1"; shift ;;
+    start|stop|status|shell) cmd="$1"; shift ;;
     logs) cmd=logs; shift; case "${1:-}" in gello|pedal) log_which="$1"; shift ;; esac ;;
     --record)   record=true; shift ;;
     --task-id)  task_id="$2"; record=true; shift 2 ;;
@@ -124,6 +128,16 @@ stop_stacks() {
 case "$cmd" in
   stop)
     stop_stacks; echo "Laptop teleop stacks stopped (container '$CONTAINER' left running)."; exit 0 ;;
+  shell)
+    container_running || { echo "ERROR: container '$CONTAINER' is not running. Run ./start_teleop.bash first." >&2; exit 1; }
+    if ! docker exec "$CONTAINER" bash -lc '[ -d /tmp/.X11-unix ]' 2>/dev/null; then
+      echo "NOTE: this container has no X11 socket, so GUI tools (rviz2, rqt) cannot display." >&2
+      echo "      Recreate it with:  ./start_teleop.bash stop && docker rm -f $CONTAINER && ./start_teleop.bash" >&2
+      echo >&2
+    fi
+    exec docker exec -it -u "$(id -u):20" -e HOME=/tmp "$CONTAINER" bash -lc \
+      "$prelude && echo 'Humble container. ros2/rviz2/rqt available; bags are under /workspace/teleop_bags.' && exec bash"
+    ;;
   status)
     container_running || { echo "container '$CONTAINER': NOT running"; exit 1; }
     echo "container '$CONTAINER': running"
