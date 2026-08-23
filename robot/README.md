@@ -13,6 +13,7 @@ them.
 |---|---|
 | `start_robot.bash` | brings up every robot stack in order: spine, arms, grippers, home the arms, then the base **last**. `--restart` stops what is running and sweeps orphans; `--skip-arms` for base+spine only; `--no-home` skips homing |
 | `activate_arms.py` | activates `joint_impedance_controller` on **both** arms from ONE DDS participant. Using two `ros2 control` calls kills the first arm — see [`../docs/RUNBOOK.md`](../docs/RUNBOOK.md) S3 |
+| `recover_arms.py` | recovers an arm demoted to `unconfigured` after a reflex, **without restarting the bringup**: error_recovery → hardware active → controller active, all from one DDS participant |
 | `base_health.sh` | read-only: reports whether the mobile base can actually move. The one check that exposes the silent `unconfigured` failure |
 | `base_nudge.py` | commands the base directly with properly stamped messages (`ros2 topic pub` does not stamp) |
 | `fastdds_wifi.xml` | DDS-on-WiFi profile. **Not in use** — see RUNBOOK S9 |

@@ -15,7 +15,7 @@ repo="$(dirname "$here")"
 
 # Deployed to the robot's home directory. teleop_home_pose.yaml comes from configs/, which
 # owns it, so the robot never has a second editable copy.
-FILES=(start_robot.bash activate_arms.py home_arms.py base_health.sh base_nudge.py fastdds_wifi.xml
+FILES=(start_robot.bash activate_arms.py home_arms.py recover_arms.py base_health.sh base_nudge.py fastdds_wifi.xml
        start_base.bash start_upper.bash start_zed.bash)
 EXTRA_SRC="$repo/configs/teleop_home_pose.yaml"
 EXTRA_DST="teleop_home_pose.yaml"

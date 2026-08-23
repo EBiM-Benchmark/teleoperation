@@ -85,7 +85,8 @@ looks. For the arms, look for this in the robot's terminal:
 libfranka: Move command aborted: motion aborted by reflex! ["communication_constraints_violation"]
 ```
 
-Recovery is a bringup. A demoted hardware component does not come back on its own.
+A demoted hardware component does not come back on its own — but it does **not** require a
+full bringup either. See [S11](#s11-fast-recovery-after-a-reflex).
 
 ---
 
@@ -216,6 +217,7 @@ Set up `ssh-copy-id companion` once and `start_teleop.bash` will check this auto
 | symptom | cause | fix |
 |---|---|---|
 | Pedals publish, base does not move, nothing logged | `TmrHardware` demoted to `unconfigured` | `base_health.sh`; re-run bringup |
+| An arm stops following its GELLO after hitting a limit | reflex; hardware demoted to `unconfigured` | `python3 ~/recover_arms.py` ([S11](#s11-fast-recovery-after-a-reflex)) — no restart needed |
 | One arm stops following GELLO right after activation | the other arm's activation command | use `activate_arms.py` ([S3](#s3-never-activate-arms-with-two-separate-commands)) |
 | Spine: `424 Client Error: Failed Dependency` on `motion-mm:start` | robot not powered on from Desk after a reboot | open `https://172.16.16.10/` and press **power on**; see [S9](#s9-known-bugs-and-gotchas) |
 | A spawner cannot reach its **own** local `controller_manager` | a Fast DDS profile with `initialPeersList` is loaded | `TMR_DDS_PROFILE` must be empty; see [S9](#s9-known-bugs-and-gotchas) |
@@ -358,3 +360,48 @@ TMR_DDS_PROFILE=$HOME/fastdds_wifi.xml ~/start_robot.bash --restart   # do not, 
 Do **not** "fix" this by lowering the base `controller_manager` `update_rate` (1000 Hz, in
 `franka_ros2/franka_bringup/config/controllers.yaml`). The base **is** the 1 kHz consumer;
 slowing it makes deadline misses worse.
+
+---
+
+## S11. Fast recovery after a reflex
+
+When an arm hits a speed or torque limit, or its FCI loop misses deadlines, libfranka aborts
+the motion and `ros2_control` demotes `<side>_FrankaHardwareInterface` to `unconfigured`
+while `joint_impedance_controller` still reports `active`. The arm stops following its GELLO.
+
+Restarting `start_robot.bash` fixes it and costs minutes. This is the same repair in seconds:
+
+```bash
+python3 ~/recover_arms.py                 # both arms
+python3 ~/recover_arms.py --side left     # just the one that died
+python3 ~/recover_arms.py --no-activate   # recover, but leave the controller inactive
+```
+
+Three steps per arm, all through **one** DDS participant:
+
+| | |
+|---|---|
+| 1 | `/<side>/action_server/error_recovery` → libfranka `automaticErrorRecovery()`, clears the reflex |
+| 2 | `set_hardware_component_state` → `<side>_FrankaHardwareInterface` back to `active` (via `inactive` if a direct jump is refused) |
+| 3 | `switch_controller` → `joint_impedance_controller` active again |
+
+It reports each hardware state as it goes, and skips an arm that is already `active`.
+
+### When this is not enough
+
+`automaticErrorRecovery()` cannot clear an error that requires **manual intervention** — a
+joint limit violation locks the brakes. If Desk shows the joints locked:
+
+1. unlock the joints in TMR Desk (`https://172.16.16.10/`)
+2. then run `recover_arms.py`
+
+That ordering is the shortcut worth knowing: **unlocking in Desk does not by itself require
+restarting the bash script.** Only if `recover_arms.py` still reports the hardware as
+something other than `active` do you need a full bringup.
+
+### Why it is one script and not three commands
+
+Running the three steps as separate `ros2` invocations would create three DDS participants,
+and each participant's 15–25 s discovery burst can abort whichever arm is still running —
+turning a one-arm problem into a two-arm one. Same reason
+[`activate_arms.py`](#s3-never-activate-arms-with-two-separate-commands) exists.
