@@ -1,0 +1,29 @@
+.vscode/
+
+# Claude Code local settings - may contain machine-specific commands/credentials
+.claude/settings.local.json
+
+build/
+install/
+log/
+
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+.cache/
+.pytest_cache/
+
+.DS_Store
+
+# Scratch captures from gello_calibration_check.py --solve
+gello_calib_samples_*.json
+# pixi environments
+.pixi/*
+!.pixi/config.toml
+
+# pixi-built workspace (host ROS 2 env, parallel to the container-built install/)
+build_pixi/
+install_pixi/
+log_pixi/

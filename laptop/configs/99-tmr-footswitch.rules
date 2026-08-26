@@ -1,0 +1,13 @@
+# PCsensor foot switches (vendor 3553, product b001) used by pedal_state_publisher.
+#
+# Without this, /dev/input/event* is root:input 0660 and a HOST-side (pixi) run of
+# pedal_state_publisher sees zero pedals: evdev.list_devices() silently returns [] for
+# devices it cannot open, so the launch reports "found 0" rather than a permission error.
+# The teleop_inputs container does not need this - it runs as root with /dev bind-mounted.
+#
+# plugdev, not input: the teleop user is already in plugdev, so no logout is needed.
+#
+# Install with:
+#   sudo cp configs/99-tmr-footswitch.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload-rules && sudo udevadm trigger --subsystem-match=input
+SUBSYSTEM=="input", ATTRS{idVendor}=="3553", ATTRS{idProduct}=="b001", MODE="0660", GROUP="plugdev"

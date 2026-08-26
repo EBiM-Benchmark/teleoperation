@@ -1,0 +1,9 @@
+# Let the teleop operator correct the robot clock without a password.
+#
+# Deliberately narrow: ONE script, which validates its only argument. This is not a blanket
+# NOPASSWD rule, and must not be widened into one - `sudo bash -c ...` without a password is
+# equivalent to passwordless root.
+#
+# Install to /etc/sudoers.d/tmr-clock, mode 0440, owner root:root, and check it with
+#   sudo visudo -cf /etc/sudoers.d/tmr-clock
+tmr-user ALL=(root) NOPASSWD: /usr/local/sbin/tmr-set-clock

@@ -1,0 +1,140 @@
+# Foot-pedal -> TMR motion mapping.
+#
+# Pedal tokens are published by pedal_state_publisher on /pedal/state as
+# "1A 1B 1C 2A 2B 2C" (switch index 1/2 + pedal letter a/b/c), joined with '+'
+# when several are pressed at once (e.g. "1A+2C"), or "NONE".
+#
+# The pedals have two roles, toggled by pressing 'm' in the keyboard_state_publisher
+# terminal. mode_manager latches the current role on /teleop/pedal_mode.
+#
+# DRIVE mode (base + spine motion) - the mapping requested:
+#   FS1.a -> x+     FS2.a -> x-
+#   FS1.b -> y+     FS2.b -> y-
+#   FS1.c -> CW     FS2.c -> CCW
+# Spine combos:  FS1.a + FS2.c -> up,  FS1.c + FS2.a -> down.
+#
+# RECORD mode (LABS data collection) - see labs_pedal_bridge below.
+
+base_bridge:
+  ros__parameters:
+    # Confirmed against tams_ws: SwerveDriveController subscribes to "~/cmd_vel" and
+    # tmr.config.yaml sets namespace "", so the fully-resolved topic is the one below.
+    cmd_vel_topic: "/swerve_drive_controller/cmd_vel"
+    frame_id: ""            # TwistStamped header frame; "" is accepted by the controller
+    publish_rate: 20.0      # Hz; must stay above the controller's cmd_vel_timeout of 0.5 s
+    # The controller hard-limits x/y to 0.1 m/s and yaw to 0.1 rad/s (controllers.yaml),
+    # and accelerations to 0.1 m/s^2 / 0.1 rad/s^2. Anything larger is silently clamped,
+    # so keep these at or below the limits. Start conservative for first live tests.
+    linear_speed: 0.05      # m/s applied to x+/x- and y+/y-  (controller max 0.1)
+    angular_speed: 0.05     # rad/s applied to CW/CCW         (controller max 0.1)
+    # per-token contribution; signs give direction, magnitude is scaled by *_speed
+    map_1A_x: 1.0
+    map_2A_x: -1.0
+    map_1B_y: 1.0
+    map_2B_y: -1.0
+    map_1C_yaw: -1.0        # clockwise  (negative angular.z)
+    map_2C_yaw: 1.0         # counter-clockwise (positive angular.z)
+
+spine_bridge:
+  ros__parameters:
+    up_combo: ["1A", "2C"]
+    down_combo: ["1C", "2A"]
+    # Confirmed against tams_ws franka_spine_server/spine_action_server.py: the node is
+    # named "franka_spine_node" and registers every name privately ("~/..."), with the
+    # launch file defaulting to an empty namespace. Note the parameters service is
+    # "get_parameters_spine" - plain "get_parameters" is taken by the standard ROS 2
+    # parameter service, which is why the server renamed it.
+    move_action: "/franka_spine_node/move_absolute"
+    switch_on_service: "/franka_spine_node/switch_on"
+    get_parameters_service: "/franka_spine_node/get_parameters_spine"
+    get_position_service: "/franka_spine_node/get_position"
+    # NOTE: no halt_service. The server's Halt posts to /spine/api/motion:halt, which
+    # does not exist on the device (404) - its swagger declares only motion:quick-stop,
+    # and that is a DS402 emergency stop leaving the spine SwitchedOff. spine_bridge
+    # therefore jogs in short chained steps and simply stops issuing them on release.
+    # 0.05 m/s is the velocity confirmed working by hand on this device with
+    # `ros2 action send_goal .../move_absolute`. The server converts to mm/s and the
+    # device requires a positive integer there, so keep this a multiple of 0.001.
+    velocity: 0.05          # m/s jog speed (-> 50 mm/s)
+    acceleration: 0.05      # m/s^2
+    deceleration: 0.05      # m/s^2
+    jog_step: 0.02          # m per chained move; also the worst-case overshoot on release
+    retry_delay: 0.5        # s to wait after a refused move before retrying
+    limit_margin: 0.005     # m, stop this far inside the reported soft limits
+    pedal_timeout: 0.5      # s without a /pedal/state message -> treat as released
+    # Commanded height, republished every tick (20 Hz) as the spine's dataset ACTION.
+    # Must be gapless or LABS' TemporalSynchronizer fails the episode conversion.
+    target_topic: "/spine/target_height"
+    # Seeds the idle position from spine_state_publisher so target_topic is populated
+    # even in an episode with no spine jog.
+    state_topic: "/spine/joint_states"
+
+mode_manager:
+  ros__parameters:
+    # DRIVE is the safe default: a fresh start never has the pedals silently inert.
+    initial_mode: "DRIVE"
+    toggle_key: "m"
+    heartbeat_rate: 1.0     # Hz; the mode is also latched (TRANSIENT_LOCAL) for late joiners
+
+labs_pedal_bridge:
+  ros__parameters:
+    # Overridden by the launch file's labs_url / task_id arguments.
+    labs_url: "http://localhost:3001"
+    # REQUIRED for start_recording. A task UUID from the LABS station's config_tasks.yml.
+    # The LABS UI keeps its selected task in a browser cookie, so there is no server-side
+    # "current task" to read - an episode started by pedal uses THIS id, which may differ
+    # from whatever the browser shows. Keep them in sync by hand.
+    task_id: ""
+    poll_interval: 0.5      # s between GET /api/v1/system/info
+    min_press_interval: 0.3 # s debounce, so one stomp is one action
+    # Generous: LABS' teleop endpoints block on a 7 s coordinator wait when no controller
+    # coordinators are deployed. HTTP runs on a worker thread, so this never stalls ROS.
+    request_timeout: 10.0
+    # Pedal -> action, per LABS state. recording_state (RECORDING/REVIEWING) wins over
+    # workflow_state, matching getButtonActions() in the LABS UI. "" means unbound.
+    # Valid actions: start_teleop stop_teleop sync_robots start_recording stop_recording
+    #                save_success save_failed discard
+    map_IDLE_1B: "start_teleop"
+    map_READY_1B: "stop_teleop"
+    map_READY_1C: "sync_robots"
+    map_SYNCING_1B: "stop_teleop"
+    map_FOLLOWING_1A: "start_recording"
+    map_FOLLOWING_1B: "stop_teleop"
+    map_RECORDING_1A: "stop_recording"
+    map_REVIEWING_2A: "save_success"
+    map_REVIEWING_2B: "save_failed"
+    map_REVIEWING_2C: "discard"
+
+mobile_base_state_bridge:
+  ros__parameters:
+    # CONFIRM AGAINST THE ROBOT before the first recording:
+    #   ros2 topic list | grep -i swerve
+    #   ros2 topic info /swerve_drive_controller/odometry
+    # LABS drops /tf at dataset-build time, so this is the only path by which base pose
+    # reaches an exported episode.
+    # VERIFIED on hardware 2026-08-23: the controller publishes "odom", not "odometry".
+    #   /swerve_drive_controller/odom      [nav_msgs/msg/Odometry] 1 publisher
+    #   /swerve_drive_controller/odometry  [nav_msgs/msg/Odometry] 1 subscriber  <- us
+    # Subscribing to the wrong name fails silently: mobile_base_state_bridge is
+    # event-driven, so it simply never fires and /mobile_base/pose + /mobile_base/twist
+    # publish NOTHING. --check still shows them present, because the bridge advertises
+    # them; only the recorded message count (0) reveals it. That is 13 of the 62 state
+    # dimensions silently missing from every episode.
+    odom_topic: "/swerve_drive_controller/odom"
+    pose_topic: "/mobile_base/pose"
+    twist_topic: "/mobile_base/twist"
+
+spine_state_publisher:
+  ros__parameters:
+    get_position_service: "/franka_spine_node/get_position"
+    get_parameters_service: "/franka_spine_node/get_parameters_spine"
+    state_topic: "/spine/joint_states"
+    joint_name: "spine_z"
+    # Publishing must be gapless and dense: LABS' TemporalSynchronizer fails the whole
+    # episode conversion if any configured topic starts >1 s late or stops >1 s early.
+    # Every tick republishes the last known height.
+    publish_rate: 50.0
+    # Polling is separate and much slower: the service is backed by HTTPS calls to the
+    # device, and polling too hard competes with spine_bridge's jog steps and provokes
+    # HTTP 424 "busy". Raise only after watching a jog with no 424s.
+    poll_rate: 5.0

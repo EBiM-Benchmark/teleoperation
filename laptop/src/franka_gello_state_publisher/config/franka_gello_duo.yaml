@@ -1,0 +1,93 @@
+# This configuration works with the pre-assembled "Franka GELLO Duo" by Franka Robotics GmbH
+# See https://franka.de/documents
+
+#LEFT:
+#  namespace: "left"
+#  com_port: "usb-ROBOTIS_OpenRB-150_xxxxxxxx" # REPLACE WITH YOUR ID
+#  num_arm_joints: 7
+#  joint_signs: [1, -1, 1, -1, 1, 1, 1]
+#  gripper: true
+#  assembly_offsets: [0.000, 0.000, 3.142, 3.142, 3.142, 4.712, 0.000] # rad
+#  gripper_range_rad: [2.00, 3.22]
+#  # Optional Dynamixel control parameters for all arm joints (+ gripper):
+#  # Warning: If using the OpenRB-150 instead of the U2D2 communication converter,
+#  #          do not enable torque until an external 5V power supply is connected to the board's
+#  #          power terminal and the jumper is set to "VIN(DXL)". Using USB power for torque
+#  #          operation may damage your computer's USB port.
+#  dynamixel_torque_enable: [     0,     0,     0,     0,     0,     0,     0,     0] # 1 on, 0 off
+#  dynamixel_goal_position: [   0.0,   0.0,   0.0,-1.571,   0.0, 1.571,   0.0, 3.509] # rad
+#  dynamixel_kp_p:          [    30,    60,     0,    30,     0,     0,     0,    50]
+#  dynamixel_kp_i:          [     0,     0,     0,     0,     0,     0,     0,     0]
+#  dynamixel_kp_d:          [   250,   100,    80,    60,    30,    10,     5,     0]
+
+# RIGHT:
+ # namespace: "right"
+ # com_port: "usb-ROBOTIS_OpenRB-150_xxxxxxxx" # REPLACE WITH YOUR ID
+ # num_arm_joints: 7
+ # joint_signs: [1, -1, 1, -1, 1, 1, 1]
+ # gripper: true
+ # assembly_offsets: [0.000, 0.000, 3.142, 3.142, 3.142, 4.712, 0.000] # rad
+ # gripper_range_rad: [2.00, 3.22]
+ # # Optional Dynamixel control parameters for all arm joints (+ gripper):
+ # # Warning: If using the OpenRB-150 instead of the U2D2 communication converter,
+ # #          do not enable torque until an external 5V power supply is connected to the board's
+ # #          power terminal and the jumper is set to "VIN(DXL)". Using USB power for torque
+ # #          operation may damage your computer's USB port.
+ # dynamixel_torque_enable: [     0,     0,     0,     0,     0,     0,     0,     0] # 1 on, 0 off
+#  dynamixel_goal_position: [   0.0,   0.0,   0.0,-1.571,   0.0, 1.571,   0.0, 3.509] # rad
+#  dynamixel_kp_p:          [    30,    60,     0,    30,     0,     0,     0,    50]
+#  dynamixel_kp_i:          [     0,     0,     0,     0,     0,     0,     0,     0]
+#  dynamixel_kp_d:          [   250,   100,    80,    60,    30,    10,     5,     0]
+
+# com_port -> side verified 2026-08-05 by moving one GELLO and watching which serial
+# device changed. These were previously SWAPPED, which made the left config read the
+# right GELLO: the calibration tool saw the arm move while "its" GELLO stayed still.
+LEFT:
+  namespace: "left"
+  joint_names: [left_fr3v2_joint1, left_fr3v2_joint2, left_fr3v2_joint3, left_fr3v2_joint4, left_fr3v2_joint5, left_fr3v2_joint6, left_fr3v2_joint7]
+  frame_id: "left_fr3v2_link0"
+  com_port: "usb-ROBOTIS_OpenRB-150_BDEDB3875157375037202020FF102618-if00"
+  num_arm_joints: 7
+  joint_signs: [-1, 1, 1, -1, 1, 1, -1]
+  gripper: true
+  # Anchored 2026-08-14 with `--anchor --to-arm`, holding the leader in the operator's
+  # actual working posture so the arms sit at the agreed home pose (see
+  # configs/teleop_home_pose.yaml). Smallest wrap-window margin 1.965 rad / 113 deg.
+  #
+  # The margin is the number that matters. An earlier set left j1 and j3 only 0.24 rad
+  # from the edge of their wrap window [MID-pi, MID+pi): moving either flipped the
+  # normalized value by 2*pi, the controller saw a 6.28 rad jump, and the 0.5 rad/s goal
+  # limiter crawled toward it - which presents as "that joint does not move" even though
+  # teleop is otherwise working. Keep this margin well above ~0.6 rad.
+  assembly_offsets: [3.684, 0.777, 3.719, 3.327, 3.659, 4.042, 1.228]
+  gripper_range_rad: [2.100, 3.320]
+  dynamixel_torque_enable: [0,0,0,0,0,0,0,0]
+  dynamixel_goal_position: [0.0,0.0,0.0,-1.571,0.0,1.571,0.0,3.509]
+  dynamixel_kp_p: [30,60,0,30,0,0,0,50]
+  dynamixel_kp_i: [0,0,0,0,0,0,0,0]
+  dynamixel_kp_d: [250,100,80,60,30,10,5,0]
+
+RIGHT:
+  namespace: "right"
+  joint_names: [right_fr3v2_joint1, right_fr3v2_joint2, right_fr3v2_joint3, right_fr3v2_joint4, right_fr3v2_joint5, right_fr3v2_joint6, right_fr3v2_joint7]
+  frame_id: "right_fr3v2_link0"
+  com_port: "usb-ROBOTIS_OpenRB-150_38F23AFA5157375037202020FF11170D-if00"
+  num_arm_joints: 7
+  # Measured 2026-08-14 with gello_calibration_check.py --live (per-joint direction test,
+  # which needs no pose matching). Independently corroborated: these equal the LEFT side's
+  # joint_signs * gello_joint_directions product, i.e. the effective direction that already
+  # works in left-arm teleop. Because the signs are correct here, the RIGHT arm needs NO
+  # gello_joint_directions override in controllers.yaml.
+  joint_signs: [1, -1, 1, -1, 1, 1, 1]
+  gripper: true
+  # Anchored 2026-08-14 with `--anchor --to-arm`, holding the leader in the operator's
+  # actual working posture so the arms sit at the agreed home pose (see
+  # configs/teleop_home_pose.yaml). Smallest wrap-window margin 1.946 rad / 111 deg -
+  # see the LEFT block for why that margin is the number to watch.
+  assembly_offsets: [0.732, 0.277, 2.127, 3.289, 2.513, 4.419, 5.135]
+  gripper_range_rad: [2.073, 3.293]
+  dynamixel_torque_enable: [0,0,0,0,0,0,0,0]
+  dynamixel_goal_position: [0.0,0.0,0.0,-1.571,0.0,1.571,0.0,3.509]
+  dynamixel_kp_p: [30,60,0,30,0,0,0,50]
+  dynamixel_kp_i: [0,0,0,0,0,0,0,0]
+  dynamixel_kp_d: [250,100,80,60,30,10,5,0]
