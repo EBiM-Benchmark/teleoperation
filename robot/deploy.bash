@@ -15,8 +15,18 @@ repo="$(dirname "$here")"
 
 # Deployed to the robot's home directory. teleop_home_pose.yaml comes from configs/, which
 # owns it, so the robot never has a second editable copy.
+# start_zed.bash is deliberately NOT deployed, as of 2026-08-27. The ZED-M is plugged into
+# the LAPTOP (ebimHP), not the robot - `lsusb | grep 2b03` on the companion finds nothing -
+# and it is published there by the zed-head-camera.service systemd unit. The robot copy
+# also launches the ZED-SDK `zed_wrapper`, which is exactly what the laptop's CUDA-free
+# zed_oc_ros node exists to replace.
+#
+# While it WAS deployed, start_robot.bash:549 found it executable, ran it as an aux stage,
+# and it died silently (aux stages are deliberately unmonitored - see start_robot.bash:258).
+# The `wait_for topic` on the next line then PASSED anyway, because the laptop was already
+# publishing that topic - so the robot appeared to bring up a head camera it never had.
 FILES=(start_robot.bash activate_arms.py home_arms.py recover.py base_health.sh base_nudge.py fastdds_wifi.xml
-       start_base.bash start_upper.bash start_zed.bash)
+       start_base.bash start_upper.bash start_gamepad.bash)
 EXTRA_SRC="$repo/configs/teleop_home_pose.yaml"
 EXTRA_DST="teleop_home_pose.yaml"
 

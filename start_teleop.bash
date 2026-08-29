@@ -31,6 +31,9 @@
 # USAGE
 #   ./start_teleop.bash                       # restart both stacks, motion only
 #   ./start_teleop.bash --record --task-id <uuid>
+#   ./start_teleop.bash --no-pedals           # foot switches are on ANOTHER host;
+#                                             # run the bridges here and let that
+#                                             # host publish /pedal/state
 #   ./start_teleop.bash --pedal-fg            # pedal stack in the FOREGROUND, so
 #                                             # keyboard_state_publisher gets a TTY and
 #                                             # 'm' / w,a,s,d,q,e work
@@ -62,13 +65,30 @@ case "$repo_host" in
   *) echo "ERROR: expected the repo under \$HOME ($HOME), got $repo_host" >&2; exit 1 ;;
 esac
 
+# Host directory used for raw rosbag output. A per-machine setting avoids baking a
+# removable-disk path into the repository; TMR_BAG_ROOT remains an explicit override.
+bag_root_config="${XDG_CONFIG_HOME:-$HOME/.config}/teleoperation/bag_root"
+if [ -n "${TMR_BAG_ROOT:-}" ]; then
+  BAG_ROOT="$TMR_BAG_ROOT"
+elif [ -r "$bag_root_config" ]; then
+  IFS= read -r BAG_ROOT < "$bag_root_config"
+else
+  BAG_ROOT="$HOME/teleop_bags"
+fi
+[ -n "$BAG_ROOT" ] || { echo "ERROR: empty bag root in $bag_root_config" >&2; exit 1; }
+
 cmd=start; record=false; task_id=""; pedal_fg=false; log_which=""; detach=false; viewer_cmd=""
+# TMR_LOCAL_PEDALS=false makes --no-pedals the default for a host that never has them.
+local_pedals="${TMR_LOCAL_PEDALS:-true}"
 while [ $# -gt 0 ]; do
   case "$1" in
     start|stop|status|shell) cmd="$1"; shift ;;
     viewer) cmd=viewer; shift; viewer_cmd="$*"; set -- ;;
     logs) cmd=logs; shift; case "${1:-}" in gello|pedal) log_which="$1"; shift ;; esac ;;
     --record)   record=true; shift ;;
+    # The foot switches live on another host (the TAMS laptop). Run the bridges
+    # here and let that host publish /pedal/state over DDS.
+    --no-pedals) local_pedals=false; shift ;;
     --task-id)  task_id="$2"; record=true; shift 2 ;;
     --pedal-fg) pedal_fg=true; shift ;;
     -d|--detach) detach=true; shift ;;
@@ -96,7 +116,15 @@ done
 # `ros2 bag record` could ever capture both. Reserving the wired link for FCI is still
 # the right idea, but it needs every participant on a matching profile, which is not
 # the case today. Opt in with TMR_DDS_PROFILE=<path> once that is sorted.
-dds_host="${TMR_DDS_PROFILE-}"
+# DEFAULT: a whitelist profile rendered from the LIVE wired address (see
+# render_dds_profile.sh). Every ROS peer is on the wired 172.16.16.0/24 now - the laptop
+# pins to its own wired address, the Jetson discovers over the wire - so the "needs every
+# participant on a matching profile" precondition above is finally met. Measured before
+# this: 25-46 MB/s of DDS image traffic on WiFi during recording. Rendering at each start
+# means DHCP churn cannot strand the profile with a stale address.
+#   TMR_DDS_PROFILE=""       -> old behaviour (all-interface discovery)
+#   TMR_DDS_PROFILE=<path>   -> some other profile
+dds_host="${TMR_DDS_PROFILE-$(bash "$HOME/teleoperation/render_dds_profile.sh" 2>/dev/null || true)}"
 dds_env=""
 if [ -n "$dds_host" ]; then
   [ -f "$dds_host" ] || { echo "ERROR: DDS profile not found: $dds_host" >&2; exit 1; }
@@ -185,6 +213,14 @@ esac
 # ------------------------------------------------------------------ container
 if ! container_running; then
   echo "Starting container '$CONTAINER'..."
+  bag_mount_args=()
+  if [ -d "$BAG_ROOT" ]; then
+    bag_mount_args=(-v "$BAG_ROOT:/bags")
+  else
+    echo "WARNING: bag root is unavailable: $BAG_ROOT" >&2
+    echo "         Starting teleoperation without a /bags mount. Raw recording remains disabled" >&2
+    echo "         until a disk is mounted or record_bag.bash --bag-root DIR is used." >&2
+  fi
   docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
   # privileged + host network: privileged for /dev (GELLO serial, evdev foot switches),
   # host network because DDS discovery to the robot must not be NATed.
@@ -197,9 +233,17 @@ if ! container_running; then
     x11_args=(-e "DISPLAY=$DISPLAY" -e QT_X11_NO_MITSHM=1 -v /tmp/.X11-unix:/tmp/.X11-unix)
     [ -f "$HOME/.Xauthority" ] && x11_args+=(-v "$HOME/.Xauthority:/tmp/.Xauthority:ro" -e XAUTHORITY=/tmp/.Xauthority)
   fi
-  docker run -d --name "$CONTAINER" --privileged --network host --init \
+  # --ipc=host is REQUIRED. Fast DDS prefers shared memory between participants on the
+  # same host, and SHM segments live in /dev/shm, which is private per IPC namespace.
+  # With the default (private) namespace this container and the realsense camera
+  # container each get their own /dev/shm: discovery still succeeds over UDP, so
+  # `ros2 topic list` shows every camera topic, but NO DATA crosses and each image
+  # topic reads SILENT - including in record_bag.bash. Diagnosed 2026-08-24; the
+  # camera compose already declared `ipc: host`, this side did not.
+  docker run -d --name "$CONTAINER" --privileged --network host --ipc=host --init \
     "${x11_args[@]}" \
     -v "$HOME:/workspace" \
+    "${bag_mount_args[@]}" \
     -v /dev/serial/by-id:/dev/serial/by-id \
     -e ROS_DOMAIN_ID="$ROS_DOMAIN_ID" -e RMW_IMPLEMENTATION=rmw_fastrtps_cpp \
     "$IMAGE" sleep infinity >/dev/null
@@ -260,13 +304,14 @@ fi
 # ------------------------------------------------------------------- restart
 stop_stacks
 
-if [ -n "$dds_host" ]; then echo "DDS: $dds_host (WiFi only; robot wired link reserved for FCI)"; \
+if [ -n "$dds_host" ]; then echo "DDS: $dds_host "; \
 else echo "DDS: default discovery (all interfaces)"; fi
 echo "Starting GELLO leaders ($GELLO_CFG)..."
 dexd "$prelude && exec ros2 launch franka_gello_state_publisher main.launch.py \
       config_file:=$GELLO_CFG > /tmp/gello.log 2>&1"
 
-pedal_args="record:=$($record && echo true || echo false)"
+pedal_args="record:=$($record && echo true || echo false) pedals:=$local_pedals"
+$local_pedals || echo "Pedals: NOT read here - another host must publish /pedal/state."
 [ -n "$task_id" ] && pedal_args="$pedal_args task_id:=$task_id"
 
 if $pedal_fg; then
