@@ -246,6 +246,9 @@ def main() -> int:
     ap.add_argument("--side", choices=["left", "right"], action="append",
                     help="recover only this arm (repeatable)")
     ap.add_argument("--arms", action="store_true", help="skip the base")
+    ap.add_argument("--base", action="store_true",
+                    help="recover ONLY the base - safe while GELLO is publishing, because "
+                         "it never activates an arm controller")
     ap.add_argument("--check", action="store_true", help="report only, change nothing")
     ap.add_argument("--no-activate", action="store_true",
                     help="recover but leave controllers inactive")
@@ -255,9 +258,16 @@ def main() -> int:
     node: Node = rclpy.create_node("recover")
     log = node.get_logger()
 
-    units = [Unit(node, f"/{s}", ARM_CONTROLLER, True) for s in (args.side or ["left", "right"])]
-    if not args.arms and not args.side:
-        units.append(Unit(node, "/", BASE_CONTROLLER, False))
+    if args.base:
+        # Base only. start_robot.bash calls this at the end of its base stage: the bringup
+        # faults its own hardware via the spawner switches, and repairing from ONE
+        # participant here avoids adding more discovery bursts to a loop that is already
+        # missing deadlines.
+        units = [Unit(node, "/", BASE_CONTROLLER, False)]
+    else:
+        units = [Unit(node, f"/{s}", ARM_CONTROLLER, True) for s in (args.side or ["left", "right"])]
+        if not args.arms and not args.side:
+            units.append(Unit(node, "/", BASE_CONTROLLER, False))
 
     # Discover everything BEFORE touching anything: no new DDS discovery while an arm is live.
     live = []

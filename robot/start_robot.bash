@@ -9,6 +9,9 @@
 
 set -Eeuo pipefail
 
+# Absolute path to this script, for the purged re-exec below.
+script_path="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
+
 ws_dir="${TMR_WS:-$HOME/tams_ws}"
 spine_ip="${TMR_SPINE_IP:-172.16.16.10}"
 # Laptop and robot MUST share a domain. Nothing in the robot's rc files sets one, so 0 is
@@ -37,15 +40,30 @@ export RMW_IMPLEMENTATION="${RMW_IMPLEMENTATION:-rmw_fastrtps_cpp}"
 # Reserving the wired link for FCI is still the right idea - see docs/RUNBOOK.md S9 - but
 # do not enable this until the profile is fixed and tested on throwaway nodes:
 #   TMR_DDS_PROFILE=$HOME/fastdds_wifi.xml ~/start_robot.bash --restart
-export FASTRTPS_DEFAULT_PROFILES_FILE="${TMR_DDS_PROFILE-}"
-if [ -z "$FASTRTPS_DEFAULT_PROFILES_FILE" ]; then
+# UDP-ONLY IS THE DEFAULT since 2026-08-24. Fast DDS prefers shared memory between
+# same-host participants, and the SHM transport on this machine repeatedly fails:
+#   [RTPS_TRANSPORT_SHM Error] Failed init_port fastrtps_portNNNN: open_and_lock_file failed
+# When it does, EVERY controller_manager becomes unreachable while the stacks still look
+# alive - recover.py reports "controller_manager not reachable" for both arms and the base
+# and only the spine (HTTP, not DDS) answers. Clearing /dev/shm/fastrtps_* fixes it until
+# the segments accumulate again. Dropping the SHM transport removes the failure mode;
+# localhost then uses UDP, the same path that already works cross-host.
+#
+#   TMR_DDS_PROFILE=none        -> old behaviour (default transports, SHM + UDP)
+#   TMR_DDS_PROFILE=<path>      -> some other profile
+export FASTRTPS_DEFAULT_PROFILES_FILE="${TMR_DDS_PROFILE-$HOME/fastdds_udp_only.xml}"
+if [ "$FASTRTPS_DEFAULT_PROFILES_FILE" = none ] || [ -z "$FASTRTPS_DEFAULT_PROFILES_FILE" ]; then
   unset FASTRTPS_DEFAULT_PROFILES_FILE
-  echo "DDS: default discovery (all interfaces)."
+  echo "DDS: default transports (SHM + UDP) - SHM has failed on this machine before."
 elif [ ! -f "$FASTRTPS_DEFAULT_PROFILES_FILE" ]; then
   echo "ERROR: DDS profile not found: $FASTRTPS_DEFAULT_PROFILES_FILE" >&2
   exit 1
 else
-  echo "DDS: $FASTRTPS_DEFAULT_PROFILES_FILE (WiFi only; wired link reserved for FCI)"
+  # The label used to say "WiFi only" because the only profile that ever existed was
+  # fastdds_wifi.xml. The default is now fastdds_udp_only.xml, which restricts the
+  # TRANSPORT (no SHM) and not the interfaces - describing it as WiFi-only is wrong
+  # and would send someone hunting a link problem that does not exist.
+  echo "DDS: $FASTRTPS_DEFAULT_PROFILES_FILE"
 fi
 # The ros2 CLI daemon caches DDS settings, so a stale one would keep using the old
 # transports and report a graph that does not match what the nodes actually see.
@@ -79,9 +97,30 @@ source /opt/ros/humble/setup.bash
 source "$ws_dir/install/local_setup.bash"
 set -u
 
-if ! ros2 pkg prefix franka_bringup 2>/dev/null | grep -q "$ws_dir"; then
-  echo "franka_bringup does not resolve to $ws_dir - the stale ~/ros2_ws overlay is in front." >&2
-  echo "Open a genuinely new terminal (exec bash inherits AMENT_PREFIX_PATH) and retry." >&2
+# An overlay already on AMENT_PREFIX_PATH stays in front, because colcon's setup files
+# prepend only-if-absent - so a shell that once sourced ~/ros2_ws keeps resolving
+# franka_bringup there no matter what this script sources. The old advice was "open a
+# genuinely new terminal", which is only a way of purging the inherited ROS variables.
+# Do that here instead, and retry ONCE. Failing again means franka_bringup really is not
+# in $ws_dir, which is a different problem and says so.
+franka_prefix="$(ros2 pkg prefix franka_bringup 2>/dev/null || true)"
+if [[ "$franka_prefix" != "$ws_dir"* ]]; then
+  if [[ "${TMR_ENV_PURGED:-0}" != "1" ]]; then
+    echo "franka_bringup resolves to ${franka_prefix:-nothing}, not $ws_dir."
+    echo "Retrying with the inherited ROS environment purged..."
+    exec env \
+      -u AMENT_PREFIX_PATH -u CMAKE_PREFIX_PATH -u COLCON_PREFIX_PATH \
+      -u AMENT_CURRENT_PREFIX -u ROS_PACKAGE_PATH -u PYTHONPATH \
+      -u LD_LIBRARY_PATH -u ROS_DISTRO -u ROS_VERSION -u ROS_PYTHON_VERSION \
+      TMR_ENV_PURGED=1 bash "$script_path" "$@"
+  fi
+
+  echo "franka_bringup does not resolve to $ws_dir, even with a purged environment." >&2
+  echo "  resolves to: ${franka_prefix:-<not found at all>}" >&2
+  echo >&2
+  echo "So this is not an overlay-ordering problem. Check:" >&2
+  echo "  ls -d $ws_dir/install/franka_bringup" >&2
+  echo "  ros2 pkg prefix franka_bringup" >&2
   exit 1
 fi
 
@@ -111,7 +150,19 @@ stale_pattern='ros2_control_node|tmrv0_2.launch|spine.launch|franka_fr3_arm_cont
 #
 # Deliberately narrow: PPID 1 (genuinely orphaned) AND owned by this user AND matching a
 # node this script starts. A process whose launch parent is still alive is never touched.
-orphan_pattern='tams_ws/install/(franka_gripper_manager|franka_spine_server)|robotiq_gripper_client|spine_action_server|/(robot_state_publisher|joint_state_publisher|rviz2)|ros2 service call .*controller_manager'
+#
+# tmr_health.py belongs here for the same reason, added 2026-08-27. It is spawned with
+# `setsid` below, so it outlives the script and is reparented to init - and it matched
+# NEITHER pattern, so every --restart left another one behind. Observed that day: 31
+# daemons, the oldest 14 h old, driving the companion to load 30 on 12 cores. Each one
+# polls both controller_managers over service calls, so they are exactly the "too little
+# headroom" that shows up as communication_constraints_violation and made a bringup fail
+# with the arm stacks never coming up.
+#
+# Safe to sweep even though the run spawns one: sweep_orphans only kills PPID 1, and the
+# daemon this run starts keeps the live script as its parent until the script exits. The
+# sweep also runs long before that spawn.
+orphan_pattern='tams_ws/install/(franka_gripper_manager|franka_spine_server)|robotiq_gripper_client|spine_action_server|/(robot_state_publisher|joint_state_publisher|rviz2)|ros2 service call .*controller_manager|tmr_health\.py|controller_manager[/ ]spawner'
 
 list_orphans() {
   # `|| true` throughout: grep exits 1 on no-match and `set -o pipefail` would abort.
@@ -190,6 +241,14 @@ if [[ -n "$existing" ]]; then
   echo "  stopped."
   # The hardware needs a moment to drop the previous FCI/base session.
   sleep 3
+elif $restart; then
+  # --restart must reset EVERY leftover, not only those stale_pattern can see. Once a
+  # previous bringup has died on its own (or been killed), `existing` is empty and the
+  # whole block above is skipped - yet reparented orphans survive, and leaked tmr_health
+  # daemons accumulate exactly in that state, one per --restart. Without this the machine
+  # keeps the load that made the previous bringup fail, so the retry fails the same way.
+  echo "No running stacks; sweeping leftover orphans (--restart)..."
+  sweep_orphans
 fi
 
 # -------------------------------------------------------------------- lifecycle
@@ -325,21 +384,97 @@ start_stage() {
 # Do NOT instead lower the base controller_manager update_rate (1000 Hz, in
 # franka_ros2/franka_bringup/config/controllers.yaml): the base IS the 1 kHz consumer here,
 # so slowing it makes the deadline misses worse, not better.
+# ---------------------------------------------------------------- health daemon
+# Started HERE, with the rest of the stack, and never mid-session. That is the whole point:
+# every `ros2` CLI check creates a new DDS participant, and participant creation is a
+# 15-25 s discovery burst that can make a live 1 kHz FCI loop miss its deadline - so
+# polling for trouble during teleop CAUSES the trouble. This daemon polls over service
+# calls on its own long-lived participant and writes a plain file, so checking costs no
+# DDS at all:
+#
+#   cat /tmp/tmr_health.json     <- safe at any time, including mid-episode
+#
+# It also logs the moment a unit is lost or recovers, which is otherwise invisible: the
+# controller keeps reporting `active` with healthy odom long after the hardware has gone.
+if [ -f "$HOME/tmr_health.py" ]; then
+  setsid python3 "$HOME/tmr_health.py" > /tmp/tmr_health.log 2>&1 < /dev/null &
+  echo "  health daemon started; check with: cat /tmp/tmr_health.json"
+fi
+
 start_base() {
   start_stage "mobile base" \
     ros2 launch franka_bringup tmrv0_2.launch.py controller_name:=swerve_drive_controller
   wait_for topic '/swerve_drive_controller/odom' 30 "base odometry"
 
-  # The base is useless if this one is not active - it owns the cartesian_velocity
-  # command interfaces the pedal bridge ultimately drives.
-  if ! ros2 control list_controllers 2>/dev/null | grep -q 'swerve_drive_controller.*active'; then
-    echo "  WARNING: swerve_drive_controller is not active; the base will not move." >&2
-  fi
-  if ! ros2 control list_controllers 2>/dev/null | grep -q 'joint_state_broadcaster.*active'; then
-    # Cosmetic only (it feeds /dynamic_joint_states and real wheel values), but it is the
-    # controller that loses the race against a stale manager, so recover it in place.
+  # joint_state_broadcaster FIRST, deliberately. It is cosmetic (real wheel values into
+  # /dynamic_joint_states), but spawning it is a controller SWITCH, and a switch is exactly
+  # what faults the hardware (see below). Do it before the repair loop, so any damage it
+  # causes is repaired rather than left behind.
+  # BOTH calls below are bounded, added 2026-08-27. Neither was, and `spawner` does not
+  # give up: with no controller_manager on / it polls list_controllers every 10 s FOREVER,
+  # so this line never returns and `|| true` cannot save it - the failure is a hang, not a
+  # non-zero exit. Observed that day after a mid-bringup Ctrl+C killed the launches:
+  # start_robot.bash sat here for minutes, holding a spawner child, while every launch
+  # below it was already dead and the log repeated
+  #   [spawner_joint_state_broadcaster]: waiting for service /controller_manager/list_controllers
+  # once per 10 s with nothing left alive that could ever answer it.
+  # `ros2 control list_controllers` blocks on the same missing service, so it is bounded too.
+  if ! timeout "${TMR_CM_QUERY_TIMEOUT:-15}" \
+        ros2 control list_controllers 2>/dev/null | grep -q 'joint_state_broadcaster.*active'; then
     echo "  joint_state_broadcaster inactive; spawning it."
-    ros2 run controller_manager spawner joint_state_broadcaster -c /controller_manager || true
+    # -k: the `ros2 run` wrapper does not always pass SIGTERM to the spawner it exec's, so
+    # follow up with SIGKILL. Any child that still escapes is caught by the orphan sweep on
+    # the next --restart, which is why the spawner is in orphan_pattern.
+    timeout -k 5 "${TMR_SPAWNER_TIMEOUT:-40}" \
+      ros2 run controller_manager spawner joint_state_broadcaster -c /controller_manager \
+      || echo "  joint_state_broadcaster did not spawn (timeout or error); continuing." >&2
+  fi
+
+  # --------------------------------------------------- make the base COMMANDABLE
+  # This bringup faults itself. Measured on 2026-08-24, from this script's own launch:
+  #
+  #   t=201.4  Successful 'activate' of hardware 'TmrHardware'
+  #   t=207.5  Loading controller 'swerve_drive_controller'
+  #   t=211.0  Loading controller 'joint_state_broadcaster'
+  #   t=213.3  spawner died, exit code 1     <- TmrHardware is `unconfigured` from here
+  #
+  # A controller switch stalls the 1 kHz RT loop past libfranka's deadline, the robot
+  # faults, and ros2_control demotes TmrHardware. Left ALONE the hardware holds `active`
+  # indefinitely (verified 60 s untouched), so this is a startup race, not decay - which
+  # is why a one-shot repair here is enough and no watchdog is needed.
+  #
+  # NEVER trust list_controllers for this: swerve_drive_controller keeps reporting
+  # `active` and /swerve_drive_controller/odom keeps publishing a healthy 50 Hz while the
+  # base ignores every command. The only honest signal is whether vx/cartesian_velocity is
+  # [claimed].
+  #
+  # ORDER: hardware first, THEN cycle the controller. Activating the controller alone does
+  # nothing - it is already `active`, so on_activate() never re-runs and never re-binds.
+  # Repair from ONE DDS participant, via recover.py --base. This must NOT be done with
+  # `ros2 service call` / `ros2 control`: each invocation creates a NEW DDS participant,
+  # participant creation is a 15-25 s discovery burst on this network, and such a burst is
+  # exactly what makes the 1 kHz FCI loop miss its deadline. An earlier version of this
+  # block looped three `ros2 service call` repairs and made things strictly worse - it
+  # fired a dozen participants at a control loop that was already failing.
+  #
+  # recover.py --base touches nothing but the base, so it is safe to run here even while
+  # GELLO is publishing: it never activates an arm controller.
+  # Report from recover.py's EXIT STATUS, never from `ros2 control`. Under bringup load
+  # that CLI returns empty output (or a traceback), so a grep-based check reads "not
+  # claimed" on a base that is perfectly healthy - it printed exactly that false warning
+  # on 2026-08-24 while recover.py reported hardware=active claimed=6 in the same second.
+  recover_py="${TMR_RECOVER:-$HOME/recover.py}"
+  if [ ! -f "$recover_py" ]; then
+    echo "  WARNING: $recover_py not found; cannot verify or repair the base." >&2
+    echo "           Check by hand:  python3 recover.py --check" >&2
+  elif python3 "$recover_py" --base; then
+    echo "  ok: base commandable"
+  else
+    echo "  WARNING: the base is NOT commandable." >&2
+    echo "           Pedals will publish correct cmd_vel and the base will ignore it," >&2
+    echo "           silently. Re-check with:  python3 $recover_py --check" >&2
+    echo "           If the hardware is stuck, open Desk (https://172.16.16.10/) and" >&2
+    echo "           confirm the base is powered on." >&2
   fi
 }
 
@@ -413,7 +548,7 @@ home_arms() {
 start_sensors() {
   if [ -x "$HOME/start_zed.bash" ]; then
     start_aux_stage "ZED head camera" "$HOME/start_zed.bash"
-    wait_for topic '/head_camera/zed_node/rgb/image_rect_color' 40 "ZED rgb"
+    wait_for topic '/head_camera/zed_node/rgb/color/rect/image' 40 "ZED rgb"
   else
     echo "  WARNING: ~/start_zed.bash not found; skipping the head camera." >&2
   fi
@@ -520,9 +655,48 @@ wait_for_controller right joint_impedance_controller "$cm_settle_timeout"
 # /<side>/franka_robot_state_broadcaster/* topics never publish. Teleoperation does not
 # use them: joint_impedance_controller reads ros2_control state interfaces directly.
 # Reported, not repaired - the fix belongs in the robot's launch config, not here.
+# franka_robot_state_broadcaster publishes 6 of the 28 topics a LeRobot episode needs -
+# 20 of the 62 state dimensions. Harmless to LOSE for teleop (joint_impedance_controller
+# reads ros2_control state interfaces directly), fatal for recording.
+#
+# It used to fail on an arm_id mismatch, asking for 'fr3/robot_state' while the hardware
+# exports 'left_fr3v2/robot_state'. That is FIXED in franka.launch.py (robot_type +
+# arm_prefix, written at the controller-name level) - do not go looking there again.
+#
+# What actually fails now is the spawner: the logs show 'Configuring controller
+# franka_robot_state_broadcaster' and then no 'Activating' and no error, with the spawner
+# dead at exit 1. It times out against a controller_manager that is too slow to answer
+# during bringup - the same timeout behind every 'failed to send response to
+# list_controllers' warning in this stage. The controller is left INACTIVE, publishing
+# nothing.
+#
+# Activating it here is safe: it is a broadcaster, so it claims only STATE interfaces and
+# no command interfaces, and cannot move the arm.
 for side in left right; do
-  if [[ "$(controller_state "$side" franka_robot_state_broadcaster)" != "active" ]]; then
-    echo "  note: $side/franka_robot_state_broadcaster not active (arm_id mismatch); harmless for teleop."
+  state="$(controller_state "$side" franka_robot_state_broadcaster)"
+  if [[ "$state" == "active" ]]; then
+    continue
+  fi
+  if [[ "$state" == "unconfigured" || -z "$state" ]]; then
+    timeout "$cm_call_timeout" ros2 service call "/$side/controller_manager/configure_controller" \
+      controller_manager_msgs/srv/ConfigureController "{name: 'franka_robot_state_broadcaster'}" \
+      >/dev/null 2>&1 || true
+    sleep 1
+  fi
+  echo "  $side/franka_robot_state_broadcaster is ${state:-unknown}; activating it (spawner race)."
+  timeout "$cm_call_timeout" ros2 service call "/$side/controller_manager/switch_controller" \
+    controller_manager_msgs/srv/SwitchController \
+    "{activate_controllers: ['franka_robot_state_broadcaster'], strictness: 1}" \
+    >/dev/null 2>&1 || true
+  sleep 2
+  state="$(controller_state "$side" franka_robot_state_broadcaster)"
+  if [[ "$state" == "active" ]]; then
+    echo "  ok: $side/franka_robot_state_broadcaster (active)"
+  else
+    echo "  WARNING: $side/franka_robot_state_broadcaster is '${state:-unknown}'." >&2
+    echo "           Teleop is unaffected, but a recording made now loses 10 of the 62" >&2
+    echo "           state dimensions for this arm and LABS will fail the episode." >&2
+    echo "           Verify with:  python3 verify_topics.py" >&2
   fi
 done
 

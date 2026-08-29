@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!--
+  Robot-side Fast DDS profile: UDP ONLY, no interface whitelist.
+
+  WHY
+  Fast DDS prefers shared memory between participants on the same host. On this Jetson the
+  SHM transport repeatedly fails to reuse its port segments:
+
+      [RTPS_TRANSPORT_SHM Error] Failed init_port fastrtps_port7411:
+          open_and_lock_file failed -> Function open_port_internal
+
+  That is not cosmetic. With it, every controller_manager becomes unreachable and the whole
+  ROS graph on this machine goes dark - stacks running, control nodes alive, and
+  `recover.py --check` reporting "controller_manager not reachable" for both arms and the
+  base. Deleting /dev/shm/fastrtps_* clears it only until the segments accumulate again.
+
+  Removing the SHM transport removes the failure mode. Localhost then uses UDP, exactly
+  like the cross-host path that has always worked.
+
+  NO interfaceWhiteList, deliberately: pinning a transport to an address this host may not
+  have makes every topic silently undiscoverable. That mistake is documented in
+  record_bag.bash. Restrict the transport, never the interfaces.
+-->
+<dds>
+  <profiles xmlns="http://www.eprosima.com/XMLSchemas/fastRTPS_Profiles">
+    <transport_descriptors>
+      <transport_descriptor>
+        <transport_id>udp_all_ifaces</transport_id>
+        <type>UDPv4</type>
+      </transport_descriptor>
+    </transport_descriptors>
+
+    <participant profile_name="robot_udp_only" is_default_profile="true">
+      <rtps>
+        <userTransports>
+          <transport_id>udp_all_ifaces</transport_id>
+        </userTransports>
+        <useBuiltinTransports>false</useBuiltinTransports>
+      </rtps>
+    </participant>
+  </profiles>
+</dds>

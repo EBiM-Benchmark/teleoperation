@@ -23,6 +23,13 @@ ws_dir="${TMR_WS:-$HOME/tams_ws}"
 # Laptop and robot MUST share a domain. Keep this in step with configs/tmr_laptop_env.sh.
 export ROS_DOMAIN_ID="${TMR_ROS_DOMAIN_ID:-0}"
 
+# Fast DDS: UDP only. The SHM transport on this machine repeatedly fails with
+#   [RTPS_TRANSPORT_SHM Error] Failed init_port fastrtps_portNNNN: open_and_lock_file failed
+# and when it does, every controller_manager becomes unreachable while the stacks still
+# look alive. Removing the SHM transport removes the failure mode; localhost falls back to
+# UDP, the same path that already works cross-host. See ~/fastdds_udp_only.xml.
+export FASTRTPS_DEFAULT_PROFILES_FILE="${TMR_DDS_PROFILE:-$HOME/fastdds_udp_only.xml}"
+
 restart=false
 skip_grippers=false
 for arg in "$@"; do
@@ -51,11 +58,11 @@ if [[ "$arm_prefix" != "$ws_dir"* ]]; then
   if [[ "${TMR_ENV_PURGED:-0}" != "1" ]]; then
     echo "franka_fr3_arm_controllers resolves to ${arm_prefix:-nothing}, not $ws_dir."
     echo "Retrying with the inherited ROS environment purged..."
-    exec env TMR_ENV_PURGED=1 \
+    exec env \
       -u AMENT_PREFIX_PATH -u CMAKE_PREFIX_PATH -u COLCON_PREFIX_PATH \
       -u AMENT_CURRENT_PREFIX -u ROS_PACKAGE_PATH -u PYTHONPATH \
       -u LD_LIBRARY_PATH -u ROS_DISTRO -u ROS_VERSION -u ROS_PYTHON_VERSION \
-      bash "$script_path" "$@"
+      TMR_ENV_PURGED=1 bash "$script_path" "$@"
   fi
 
   echo "franka_fr3_arm_controllers does not resolve to $ws_dir, even with a purged environment." >&2
