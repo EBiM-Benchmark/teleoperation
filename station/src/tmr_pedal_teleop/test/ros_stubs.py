@@ -123,6 +123,12 @@ class JointState:
         self.position = []
 
 
+class Joy:
+    def __init__(self, axes=None, buttons=None):
+        self.axes = list(axes or [])
+        self.buttons = list(buttons or [])
+
+
 class _Vec:
     def __init__(self):
         self.x = self.y = self.z = 0.0
@@ -191,6 +197,7 @@ def install():
     sensor = types.ModuleType("sensor_msgs")
     sensor_msg = types.ModuleType("sensor_msgs.msg")
     sensor_msg.JointState = JointState
+    sensor_msg.Joy = Joy
     sensor.msg = sensor_msg
 
     geo = types.ModuleType("geometry_msgs")

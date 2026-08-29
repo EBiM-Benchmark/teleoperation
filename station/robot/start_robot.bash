@@ -150,7 +150,19 @@ stale_pattern='ros2_control_node|tmrv0_2.launch|spine.launch|franka_fr3_arm_cont
 #
 # Deliberately narrow: PPID 1 (genuinely orphaned) AND owned by this user AND matching a
 # node this script starts. A process whose launch parent is still alive is never touched.
-orphan_pattern='tams_ws/install/(franka_gripper_manager|franka_spine_server)|robotiq_gripper_client|spine_action_server|/(robot_state_publisher|joint_state_publisher|rviz2)|ros2 service call .*controller_manager'
+#
+# tmr_health.py belongs here for the same reason, added 2026-08-27. It is spawned with
+# `setsid` below, so it outlives the script and is reparented to init - and it matched
+# NEITHER pattern, so every --restart left another one behind. Observed that day: 31
+# daemons, the oldest 14 h old, driving the companion to load 30 on 12 cores. Each one
+# polls both controller_managers over service calls, so they are exactly the "too little
+# headroom" that shows up as communication_constraints_violation and made a bringup fail
+# with the arm stacks never coming up.
+#
+# Safe to sweep even though the run spawns one: sweep_orphans only kills PPID 1, and the
+# daemon this run starts keeps the live script as its parent until the script exits. The
+# sweep also runs long before that spawn.
+orphan_pattern='tams_ws/install/(franka_gripper_manager|franka_spine_server)|robotiq_gripper_client|spine_action_server|/(robot_state_publisher|joint_state_publisher|rviz2)|ros2 service call .*controller_manager|tmr_health\.py|controller_manager[/ ]spawner'
 
 list_orphans() {
   # `|| true` throughout: grep exits 1 on no-match and `set -o pipefail` would abort.
@@ -229,6 +241,14 @@ if [[ -n "$existing" ]]; then
   echo "  stopped."
   # The hardware needs a moment to drop the previous FCI/base session.
   sleep 3
+elif $restart; then
+  # --restart must reset EVERY leftover, not only those stale_pattern can see. Once a
+  # previous bringup has died on its own (or been killed), `existing` is empty and the
+  # whole block above is skipped - yet reparented orphans survive, and leaked tmr_health
+  # daemons accumulate exactly in that state, one per --restart. Without this the machine
+  # keeps the load that made the previous bringup fail, so the retry fails the same way.
+  echo "No running stacks; sweeping leftover orphans (--restart)..."
+  sweep_orphans
 fi
 
 # -------------------------------------------------------------------- lifecycle
@@ -390,9 +410,24 @@ start_base() {
   # /dynamic_joint_states), but spawning it is a controller SWITCH, and a switch is exactly
   # what faults the hardware (see below). Do it before the repair loop, so any damage it
   # causes is repaired rather than left behind.
-  if ! ros2 control list_controllers 2>/dev/null | grep -q 'joint_state_broadcaster.*active'; then
+  # BOTH calls below are bounded, added 2026-08-27. Neither was, and `spawner` does not
+  # give up: with no controller_manager on / it polls list_controllers every 10 s FOREVER,
+  # so this line never returns and `|| true` cannot save it - the failure is a hang, not a
+  # non-zero exit. Observed that day after a mid-bringup Ctrl+C killed the launches:
+  # start_robot.bash sat here for minutes, holding a spawner child, while every launch
+  # below it was already dead and the log repeated
+  #   [spawner_joint_state_broadcaster]: waiting for service /controller_manager/list_controllers
+  # once per 10 s with nothing left alive that could ever answer it.
+  # `ros2 control list_controllers` blocks on the same missing service, so it is bounded too.
+  if ! timeout "${TMR_CM_QUERY_TIMEOUT:-15}" \
+        ros2 control list_controllers 2>/dev/null | grep -q 'joint_state_broadcaster.*active'; then
     echo "  joint_state_broadcaster inactive; spawning it."
-    ros2 run controller_manager spawner joint_state_broadcaster -c /controller_manager || true
+    # -k: the `ros2 run` wrapper does not always pass SIGTERM to the spawner it exec's, so
+    # follow up with SIGKILL. Any child that still escapes is caught by the orphan sweep on
+    # the next --restart, which is why the spawner is in orphan_pattern.
+    timeout -k 5 "${TMR_SPAWNER_TIMEOUT:-40}" \
+      ros2 run controller_manager spawner joint_state_broadcaster -c /controller_manager \
+      || echo "  joint_state_broadcaster did not spawn (timeout or error); continuing." >&2
   fi
 
   # --------------------------------------------------- make the base COMMANDABLE

@@ -26,7 +26,8 @@
 #   ./record_bag.bash --info               # inspect the most recent bag
 #   ./record_bag.bash                      # record everything, Ctrl+C to stop
 #   ./record_bag.bash --no-video           # state/action/lidar only (low bandwidth)
-#   ./record_bag.bash --out DIR            # default ~/teleop_bags/<timestamp>
+#   ./record_bag.bash --bag-root DIR       # save on another disk/directory
+#   ./record_bag.bash --out DIR            # exact bag path (must be under bag root)
 #   ./record_bag.bash --name my_episode    # bag name suffix
 #
 # COLLECTING A DATASET
@@ -46,6 +47,7 @@
 set -Eeuo pipefail
 
 CONTAINER="${TMR_CONTAINER:-gello-humble}"
+IMAGE="${TMR_IMAGE:-teleoperation_devcontainer-gello-ros2:latest}"
 export ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-0}"
 
 repo_host="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -53,6 +55,18 @@ case "$repo_host" in
   "$HOME"/*) repo_ctr="/workspace/${repo_host#"$HOME"/}" ;;
   *) echo "ERROR: expected the repo under \$HOME ($HOME), got $repo_host" >&2; exit 1 ;;
 esac
+
+# Keep the host path and the container path separate. The launcher bind-mounts the
+# configured host directory at /bags so removable storage works without symlink tricks.
+bag_root_config="${XDG_CONFIG_HOME:-$HOME/.config}/teleoperation/bag_root"
+if [ -n "${TMR_BAG_ROOT:-}" ]; then
+  BAG_ROOT="$TMR_BAG_ROOT"
+elif [ -r "$bag_root_config" ]; then
+  IFS= read -r BAG_ROOT < "$bag_root_config"
+else
+  BAG_ROOT="$HOME/teleop_bags"
+fi
+[ -n "$BAG_ROOT" ] || { echo "ERROR: empty bag root in $bag_root_config" >&2; exit 1; }
 
 # ---------------------------------------------------------------- topic manifest
 # Observation - robot state. These 20 dims are the arms; see modality.json for the layout.
@@ -117,6 +131,9 @@ while [ $# -gt 0 ]; do
     --check)    mode=check; shift ;;
     --info)     mode=info; shift ;;
     --no-video) want_video=false; shift ;;
+    --bag-root|--save-dir)
+                 [ $# -ge 2 ] || { echo "ERROR: $1 requires a directory" >&2; exit 2; }
+                 BAG_ROOT="$2"; shift 2 ;;
     --out)      out="$2"; shift 2 ;;
     --name)     name="$2"; shift 2 ;;
     --task)     task="$2"; shift 2 ;;
@@ -126,6 +143,20 @@ while [ $# -gt 0 ]; do
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
+
+if [ "$mode" != check ]; then
+  case "$BAG_ROOT" in
+    /*) ;;
+    *) echo "ERROR: bag root must be an absolute path: $BAG_ROOT" >&2; exit 2 ;;
+  esac
+  if [ ! -d "$BAG_ROOT" ]; then
+    echo "ERROR: bag root does not exist: $BAG_ROOT" >&2
+    echo "       Mount the disk and create this directory first." >&2
+    exit 1
+  fi
+  BAG_ROOT="$(realpath -e -- "$BAG_ROOT")"
+  [ "$BAG_ROOT" != "/" ] || { echo "ERROR: refusing to use / as the bag root" >&2; exit 2; }
+fi
 
 topics=("${STATE_TOPICS[@]}" "${ACTION_TOPICS[@]}" "${LIDAR_TOPICS[@]}" "${EXTRA_TOPICS[@]}")
 $want_video && topics+=("${VIDEO_TOPICS[@]}")
@@ -169,7 +200,9 @@ prelude="source /opt/ros/humble/setup.bash \
   && cd '$repo_ctr' && source install/setup.bash \
   && export ROS_DOMAIN_ID=$ROS_DOMAIN_ID RMW_IMPLEMENTATION=rmw_fastrtps_cpp PYTHONUNBUFFERED=1 $dds_env"
 
-dex()  { docker exec -u "$(id -u):20" -e HOME=/tmp "$CONTAINER" bash -lc "$1"; }
+EXEC_CONTAINER="$CONTAINER"
+HELPER_CONTAINER=""
+dex()  { docker exec -u "$(id -u):20" -e HOME=/tmp "$EXEC_CONTAINER" bash -lc "$1"; }
 
 [ "$(docker inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null)" = true ] || {
   echo "ERROR: container '$CONTAINER' is not running. Start it with ./start_teleop.bash" >&2
@@ -189,7 +222,7 @@ episode_count() {
 
 # --status touches neither the ROS graph nor the robot; safe at any time.
 if [ "$mode" = status ]; then
-  root="$HOME/teleop_bags"
+  root="$BAG_ROOT"
   [ -d "$root" ] || { echo "No bags yet in $root"; exit 0; }
   printf "%-24s %8s %8s   %s\n" TASK DONE TARGET PROGRESS
   found=0
@@ -216,19 +249,55 @@ if [ "$mode" = status ]; then
   exit 0
 fi
 
+# A running container cannot acquire a new bind mount. If the selected bag root differs
+# from the teleoperation container's /bags mount, create a recorder-only helper container.
+# It shares ROS networking and Fast DDS SHM but never starts/stops teleoperation nodes.
+if [ "$mode" != check ]; then
+  mounted_root="$(docker inspect -f '{{range .Mounts}}{{if eq .Destination "/bags"}}{{.Source}}{{end}}{{end}}' "$CONTAINER" 2>/dev/null || true)"
+  if [ "$mounted_root" != "$BAG_ROOT" ]; then
+    if img="$(docker inspect "$CONTAINER" --format '{{.Config.Image}}' 2>/dev/null)" && [ -n "$img" ]; then
+      :
+    else
+      img="$IMAGE"
+    fi
+    HELPER_CONTAINER="bag-recorder-$(id -u)-$$"
+    cleanup_helper() {
+      [ -z "$HELPER_CONTAINER" ] || docker rm -f "$HELPER_CONTAINER" >/dev/null 2>&1 || true
+    }
+    trap cleanup_helper EXIT
+    echo "Using recorder-only container for bag root: $BAG_ROOT"
+    docker run -d --rm --name "$HELPER_CONTAINER" --network host --ipc=host --init \
+      -v "$HOME:/workspace" -v "$BAG_ROOT:/bags" \
+      -e ROS_DOMAIN_ID="$ROS_DOMAIN_ID" -e RMW_IMPLEMENTATION=rmw_fastrtps_cpp \
+      "$img" sleep infinity >/dev/null
+    EXEC_CONTAINER="$HELPER_CONTAINER"
+    if ! docker exec "$EXEC_CONTAINER" bash -lc \
+      'test -d /opt/ros/humble/share/rosbag2_storage_mcap' >/dev/null 2>&1; then
+      echo "Installing MCAP storage in the recorder-only container..."
+      docker exec -u 0 "$EXEC_CONTAINER" bash -lc \
+        'apt-get update -qq && apt-get install -y -qq ros-humble-rosbag2-storage-mcap' \
+        >/dev/null
+    fi
+  fi
+fi
+
 # --info inspects a bag on disk and touches the ROS graph not at all, so it is safe to run
 # while the robot is live - unlike --check, which creates a participant.
 if [ "$mode" = info ]; then
   # Look one level deeper than the old flat layout: --task nests bags inside a task
   # directory, so `ls -dt ~/teleop_bags/*/` would return the TASK dir, not a bag.
   # Match on metadata.yaml so an interrupted recording is never picked as "the latest".
-  bag="${out:-$(find "$HOME/teleop_bags" -maxdepth 3 -name metadata.yaml -printf '%T@ %h\n' 2>/dev/null \
+  bag="${out:-$(find "$BAG_ROOT" -maxdepth 3 -name metadata.yaml -printf '%T@ %h\n' 2>/dev/null \
                  | sort -rn | head -1 | cut -d' ' -f2-)}"
-  [ -n "$bag" ] || { echo "No bags found in ~/teleop_bags" >&2; exit 1; }
+  [ -n "$bag" ] || { echo "No bags found in $BAG_ROOT" >&2; exit 1; }
   bag="${bag%/}"
   echo "Bag: $bag  ($(du -sh "$bag" 2>/dev/null | cut -f1))"
   [ -f "$bag/metadata.yaml" ] || echo "  WARNING: no metadata.yaml - the recorder was killed before finalising." >&2
-  info="$(dex "source /opt/ros/humble/setup.bash && ros2 bag info '/workspace/${bag#"$HOME"/}' 2>&1" || true)"
+  case "$bag" in
+    "$BAG_ROOT"/*) bag_ctr="/bags/${bag#"$BAG_ROOT"/}" ;;
+    *) echo "ERROR: bag is outside the configured bag root: $BAG_ROOT" >&2; exit 1 ;;
+  esac
+  info="$(dex "source /opt/ros/humble/setup.bash && ros2 bag info '$bag_ctr' 2>&1" || true)"
   echo "$info" | grep -E "Duration|Start|End|Messages|Bag size|Storage"
   echo
   echo "Topics by message count:"
@@ -296,7 +365,7 @@ if [ -n "$task" ]; then
   # Task-scoped, auto-numbered. The number is derived from what is already on disk, so
   # two operators recording the same task on the same machine cannot collide, and a
   # deleted bad episode frees its number for reuse.
-  task_dir="$HOME/teleop_bags/$task"
+  task_dir="$BAG_ROOT/$task"
   mkdir -p "$task_dir"
   done_n="$(episode_count "$task_dir")"
   next_n=$(( done_n + 1 ))
@@ -313,12 +382,22 @@ if [ -n "$task" ]; then
   echo
 else
   [ -n "$name" ] && stamp="${stamp}_${name}"
-  out="${out:-$HOME/teleop_bags/$stamp}"
+  out="${out:-$BAG_ROOT/$stamp}"
 fi
 case "$out" in
-  "$HOME"/*) out_ctr="/workspace/${out#"$HOME"/}" ;;
-  *) echo "ERROR: --out must be under \$HOME so the container can see it" >&2; exit 1 ;;
+  "$BAG_ROOT"/*) out_ctr="/bags/${out#"$BAG_ROOT"/}" ;;
+  *) echo "ERROR: --out must be under the configured bag root: $BAG_ROOT" >&2; exit 1 ;;
 esac
+[ -d "$BAG_ROOT" ] || {
+  echo "ERROR: bag root is unavailable: $BAG_ROOT" >&2
+  echo "       Mount the recording disk before recording." >&2
+  exit 1
+}
+mounted_root="$(docker inspect -f '{{range .Mounts}}{{if eq .Destination "/bags"}}{{.Source}}{{end}}{{end}}' "$EXEC_CONTAINER" 2>/dev/null || true)"
+[ "$mounted_root" = "$BAG_ROOT" ] || {
+  echo "ERROR: recorder container '$EXEC_CONTAINER' does not mount $BAG_ROOT at /bags." >&2
+  exit 1
+}
 mkdir -p "$(dirname "$out")"
 
 echo
@@ -351,9 +430,9 @@ fi
 cleanup() {
   trap - INT TERM
   echo; echo "stopping the recorder inside the container..."
-  docker exec "$CONTAINER" bash -lc 'pkill -INT -f "ros2 bag record"' >/dev/null 2>&1 || true
+  docker exec "$EXEC_CONTAINER" bash -lc 'pkill -INT -f "ros2 bag record"' >/dev/null 2>&1 || true
   for _ in $(seq 1 20); do
-    docker exec "$CONTAINER" bash -lc 'pgrep -f "ros2 bag record" >/dev/null' 2>/dev/null || break
+    docker exec "$EXEC_CONTAINER" bash -lc 'pgrep -f "ros2 bag record" >/dev/null' 2>/dev/null || break
     sleep 0.5
   done
 }
@@ -370,7 +449,7 @@ trap cleanup INT TERM
 # foreground command returns, and `docker exec` never returns on its own - so Ctrl+C was
 # deferred forever and the recorder kept running with the bag left unfinalised. `wait` is
 # interruptible, which lets cleanup() actually run.
-docker exec -u "$(id -u):20" -e HOME=/tmp "$CONTAINER" bash -lc \
+docker exec -u "$(id -u):20" -e HOME=/tmp "$EXEC_CONTAINER" bash -lc \
   "$prelude && exec ros2 bag record $storage $cache -o '$out_ctr' ${topics[*]}" &
 rec_pid=$!
 wait "$rec_pid" 2>/dev/null || true
@@ -393,8 +472,7 @@ if [ -d "$out" ]; then
     printf '    %s\n' $empty >&2
   fi
   echo "Inspect with:"
-  echo "  docker exec -u $(id -u):20 -e HOME=/tmp $CONTAINER bash -lc \\"
-  echo "    'source /opt/ros/humble/setup.bash && ros2 bag info $out_ctr'"
+  echo "  ./record_bag.bash --bag-root '$BAG_ROOT' --info --out '$out'"
 else
   echo "No bag was written." >&2
 fi

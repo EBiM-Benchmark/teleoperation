@@ -22,11 +22,21 @@
 #
 # UDP only, no SHM - shared memory between containers with separate /dev/shm delivers
 # discovery but no data (diagnosed 2026-08-24; do not re-add SHM without re-testing).
+# maxMessageSize must accept the ZED publisher's ~64 KiB UDP fragments. At 1400 bytes the
+# recorder discovered and subscribed to the image topic but received zero payloads, while
+# the same recorder at 65500 captured the expected 30 Hz. The interface whitelist still
+# keeps DDS off WiFi; this limit only controls accepted RTPS datagram size.
 set -u
 
 addr="$(ip -4 -o addr show up scope global 2>/dev/null \
         | awk '$4 ~ /^172\.16\.16\./ {sub(/\/.*/, "", $4); print $4; exit}')"
 [ -n "$addr" ] || exit 0   # no wired link: caller falls back to all-interface discovery
+
+# The dedicated 2.5GbE direct link to the Jetson (its eno1 / PC-Direct, 172.16.1.9).
+# The Jetson's DDS is whitelisted to THAT subnet only, so without this address here the
+# two hosts stop exchanging DDS entirely - ZED, odometry, cmd_vel, all of it.
+direct="$(ip -4 -o addr show up scope global 2>/dev/null \
+        | awk '$4 ~ /^172\.16\.1\./ {sub(/\/.*/, "", $4); print $4; exit}')"
 
 profile="$HOME/.tmr_dds_whitelist.xml"
 cat > "$profile" <<XML
@@ -38,10 +48,10 @@ cat > "$profile" <<XML
       <transport_descriptor>
         <transport_id>wired_udp</transport_id>
         <type>UDPv4</type>
-        <receiverBufferSize>12582912</receiverBufferSize>
-        <sendBufferSize>12582912</sendBufferSize>
+        <maxMessageSize>65500</maxMessageSize>
         <interfaceWhiteList>
-          <address>${addr}</address>
+          <address>${addr}</address>${direct:+
+          <address>${direct}</address>}
           <address>127.0.0.1</address>
         </interfaceWhiteList>
       </transport_descriptor>

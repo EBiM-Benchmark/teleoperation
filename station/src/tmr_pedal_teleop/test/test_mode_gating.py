@@ -113,3 +113,64 @@ def test_defaults_to_drive_without_a_mode_manager():
     """A bare `ros2 run base_bridge` must still drive."""
     node, tick, pedal, _ = _make()
     assert node.mode == DRIVE
+
+
+def _joy(x=0.0, y=0.0, yaw=0.0, enabled=True, turbo=False):
+    axes = [y, x, 0.0, yaw]
+    buttons = [0] * 6
+    buttons[5] = int(enabled)  # RB
+    buttons[4] = int(turbo)  # LB
+    return ros_stubs.Joy(axes, buttons)
+
+
+def test_gamepad_drives_when_no_pedal_is_pressed():
+    node, tick, pedal, _ = _make()
+    pedal(ros_stubs.String("NONE"))
+    node.subs["/teleop/gamepad/joy"](_joy(x=1.0, y=-0.5, yaw=0.5))
+    tick()
+    assert _vec(_last(node)) == (0.05, -0.025, 0.025)
+
+
+def test_any_pedal_press_has_priority_over_gamepad():
+    node, tick, pedal, _ = _make()
+    node.subs["/teleop/gamepad/joy"](_joy(x=-1.0))
+    pedal(ros_stubs.String("1A"))
+    tick()
+    assert _vec(_last(node)) == (0.05, 0.0, 0.0)
+
+
+def test_record_pedal_stops_gamepad_until_released():
+    node, tick, pedal, mode = _make()
+    mode(ros_stubs.String(RECORD))
+    node.subs["/teleop/gamepad/joy"](_joy(x=1.0))
+
+    pedal(ros_stubs.String("1A"))
+    tick()
+    assert _vec(_last(node)) == (0.0, 0.0, 0.0)
+
+    pedal(ros_stubs.String("NONE"))
+    tick()
+    assert _vec(_last(node)) == (0.05, 0.0, 0.0)
+
+
+def test_gamepad_requires_deadman_and_fresh_messages():
+    node, tick, pedal, _ = _make()
+    pedal(ros_stubs.String("NONE"))
+    joy = node.subs["/teleop/gamepad/joy"]
+
+    joy(_joy(x=1.0, enabled=False))
+    tick()
+    assert _vec(_last(node)) == (0.0, 0.0, 0.0)
+
+    joy(_joy(x=1.0))
+    node._clock.t += 1.0
+    tick()
+    assert _vec(_last(node)) == (0.0, 0.0, 0.0)
+
+
+def test_gamepad_turbo_uses_controller_limits():
+    node, tick, pedal, _ = _make()
+    pedal(ros_stubs.String("NONE"))
+    node.subs["/teleop/gamepad/joy"](_joy(x=1.0, yaw=-1.0, turbo=True))
+    tick()
+    assert _vec(_last(node)) == (0.1, 0.0, -0.1)

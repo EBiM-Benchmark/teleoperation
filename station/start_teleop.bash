@@ -65,6 +65,18 @@ case "$repo_host" in
   *) echo "ERROR: expected the repo under \$HOME ($HOME), got $repo_host" >&2; exit 1 ;;
 esac
 
+# Host directory used for raw rosbag output. A per-machine setting avoids baking a
+# removable-disk path into the repository; TMR_BAG_ROOT remains an explicit override.
+bag_root_config="${XDG_CONFIG_HOME:-$HOME/.config}/teleoperation/bag_root"
+if [ -n "${TMR_BAG_ROOT:-}" ]; then
+  BAG_ROOT="$TMR_BAG_ROOT"
+elif [ -r "$bag_root_config" ]; then
+  IFS= read -r BAG_ROOT < "$bag_root_config"
+else
+  BAG_ROOT="$HOME/teleop_bags"
+fi
+[ -n "$BAG_ROOT" ] || { echo "ERROR: empty bag root in $bag_root_config" >&2; exit 1; }
+
 cmd=start; record=false; task_id=""; pedal_fg=false; log_which=""; detach=false; viewer_cmd=""
 # TMR_LOCAL_PEDALS=false makes --no-pedals the default for a host that never has them.
 local_pedals="${TMR_LOCAL_PEDALS:-true}"
@@ -159,14 +171,7 @@ case "$cmd" in
     img="$(docker inspect "$CONTAINER" --format '{{.Config.Image}}' 2>/dev/null || echo "$IMAGE")"
     vcmd="${viewer_cmd:-ros2 run rqt_image_view rqt_image_view}"
     echo "Viewer container: $vcmd    (close the window to exit)"
-    # --ipc=host is REQUIRED, not a nicety. Fast DDS prefers shared memory between
-    # participants on the same host, and SHM segments live in /dev/shm - which is private
-    # per IPC namespace. With the default (private) namespace this container and the
-    # realsense camera container each get their own /dev/shm: discovery succeeds over UDP,
-    # so `ros2 topic list` shows the camera topics, but NO DATA ever crosses and every
-    # image topic reads SILENT. Diagnosed 2026-08-24; the camera compose already had
-    # `ipc: host`, this side did not.
-    exec docker run --rm --network host --ipc=host --privileged \
+    exec docker run --rm --network host --privileged \
       -e DISPLAY="$DISPLAY" -e QT_X11_NO_MITSHM=1 \
       -v /tmp/.X11-unix:/tmp/.X11-unix \
       ${XAUTH_ARGS:+$XAUTH_ARGS} \
@@ -208,6 +213,14 @@ esac
 # ------------------------------------------------------------------ container
 if ! container_running; then
   echo "Starting container '$CONTAINER'..."
+  bag_mount_args=()
+  if [ -d "$BAG_ROOT" ]; then
+    bag_mount_args=(-v "$BAG_ROOT:/bags")
+  else
+    echo "WARNING: bag root is unavailable: $BAG_ROOT" >&2
+    echo "         Starting teleoperation without a /bags mount. Raw recording remains disabled" >&2
+    echo "         until a disk is mounted or record_bag.bash --bag-root DIR is used." >&2
+  fi
   docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
   # privileged + host network: privileged for /dev (GELLO serial, evdev foot switches),
   # host network because DDS discovery to the robot must not be NATed.
@@ -230,6 +243,7 @@ if ! container_running; then
   docker run -d --name "$CONTAINER" --privileged --network host --ipc=host --init \
     "${x11_args[@]}" \
     -v "$HOME:/workspace" \
+    "${bag_mount_args[@]}" \
     -v /dev/serial/by-id:/dev/serial/by-id \
     -e ROS_DOMAIN_ID="$ROS_DOMAIN_ID" -e RMW_IMPLEMENTATION=rmw_fastrtps_cpp \
     "$IMAGE" sleep infinity >/dev/null
