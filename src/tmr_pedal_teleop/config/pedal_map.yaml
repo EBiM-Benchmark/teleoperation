@@ -34,6 +34,22 @@ base_bridge:
     map_2B_y: -1.0
     map_1C_yaw: -1.0        # clockwise  (negative angular.z)
     map_2C_yaw: 1.0         # counter-clockwise (positive angular.z)
+    # Companion gamepad coexistence. The companion publishes only Joy messages; this
+    # base_bridge remains the sole owner of the real cmd_vel topic. Hold RB to drive.
+    # Any pedal press takes priority and suppresses gamepad motion until released.
+    gamepad_enabled: true
+    gamepad_topic: "/teleop/gamepad/joy"
+    gamepad_timeout: 0.5
+    gamepad_deadzone: 0.3
+    gamepad_axis_x: 1        # left stick vertical
+    gamepad_axis_y: 0        # left stick horizontal
+    gamepad_axis_yaw: 3      # right stick horizontal
+    gamepad_enable_button: 5 # RB deadman
+    gamepad_turbo_button: 4  # LB, while RB remains held
+    gamepad_linear_speed: 0.05
+    gamepad_angular_speed: 0.05
+    gamepad_turbo_linear_speed: 0.1
+    gamepad_turbo_angular_speed: 0.1
 
 spine_bridge:
   ros__parameters:

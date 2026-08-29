@@ -31,6 +31,7 @@ def generate_launch_description():
     labs_url = LaunchConfiguration("labs_url")
     task_id = LaunchConfiguration("task_id")
     record = LaunchConfiguration("record")
+    pedals = LaunchConfiguration("pedals")
 
     return LaunchDescription(
         [
@@ -55,11 +56,23 @@ def generate_launch_description():
                 default_value="true",
                 description="Start the LABS bridge and state publishers as well as motion.",
             ),
+            # Set pedals:=false when the foot switches are plugged into a DIFFERENT
+            # host (the TAMS laptop as of 2026-08-23). Every bridge below only
+            # SUBSCRIBES to /pedal/state, so none of them care which machine publishes
+            # it - but starting the publisher here with no switches attached raises a
+            # device error for hardware that was never meant to be local.
+            DeclareLaunchArgument(
+                "pedals",
+                default_value="true",
+                description="Read the foot switches on THIS host. false = another "
+                "host publishes /pedal/state.",
+            ),
             Node(
                 package="pedal_state_publisher",
                 executable="pedal_state_publisher",
                 name="pedal_state_publisher",
                 output="screen",
+                condition=IfCondition(pedals),
             ),
             # Owns the DRIVE/RECORD mode and latches it on /teleop/pedal_mode.
             Node(
